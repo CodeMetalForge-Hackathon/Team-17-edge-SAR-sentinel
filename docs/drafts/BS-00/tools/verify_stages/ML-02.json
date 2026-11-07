@@ -1,0 +1,52 @@
+{
+  "contract": "ML-02",
+  "branch": "codex/ML-02",
+  "base": "main",
+  "attempt_budget": 4,
+  "stall_window": 2,
+  "required_modules": [
+    "numpy",
+    "sklearn",
+    "joblib",
+    "pytest"
+  ],
+  "allowed_paths": [
+    "pi/damage_context.py",
+    "pi/bus.py",
+    "pi/dashboard.py",
+    "demo_assets/*.json",
+    "THIRD_PARTY.md",
+    "TODO.md",
+    "README.md",
+    "docs/evidence/ML-02/*",
+    "docs/drafts/ML-02/*"
+  ],
+  "stages": [
+    {
+      "name": "regression",
+      "tests": [
+        "tests/test_core.py",
+        "tests/test_guardrail_invariants.py",
+        "tests/contract/test_sw01_vib_semantics.py",
+        "tests/contract/test_sw03_reset_hazards.py",
+        "tests/contract/test_sw04_freshness_fusion.py",
+        "tests/contract/test_sw00_launcher.py"
+      ],
+      "min_tests": 53,
+      "timeout_s": 180
+    },
+    {
+      "name": "acceptance",
+      "tests": [
+        "tests/contract/test_ml02_context.py"
+      ],
+      "min_tests": 12,
+      "timeout_s": 180
+    }
+  ],
+  "physical_outstanding": [
+    "INT-02: panel works with Wi-Fi off",
+    "Human: real context files reviewed and labelled"
+  ],
+  "stronger_review_required": true
+}

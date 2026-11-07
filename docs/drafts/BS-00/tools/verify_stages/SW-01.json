@@ -1,0 +1,52 @@
+{
+  "contract": "SW-01",
+  "branch": "codex/SW-01",
+  "base": "main",
+  "attempt_budget": 4,
+  "stall_window": 2,
+  "required_modules": [
+    "numpy",
+    "sklearn",
+    "joblib",
+    "pytest"
+  ],
+  "allowed_paths": [
+    "arduino/sensor_node/sensor_node.ino",
+    "pi/simulate.py",
+    "pi/features.py",
+    "pi/anomaly.py",
+    "pi/brain.py",
+    "pi/bus.py",
+    "TODO.md",
+    "README.md",
+    "docs/evidence/SW-01/*",
+    "docs/drafts/SW-01/*"
+  ],
+  "stages": [
+    {
+      "name": "regression",
+      "tests": [
+        "tests/test_core.py",
+        "tests/test_guardrail_invariants.py",
+        "tests/contract/test_sw00_launcher.py"
+      ],
+      "min_tests": 19,
+      "timeout_s": 180
+    },
+    {
+      "name": "acceptance",
+      "tests": [
+        "tests/contract/test_sw01_vib_semantics.py"
+      ],
+      "min_tests": 10,
+      "timeout_s": 180
+    }
+  ],
+  "physical_outstanding": [
+    "HW-B1: firmware compiles and flashes",
+    "HW-B1: one tap on the bench gives a small vib count, sustained shake gives a large one",
+    "HW-B1: LED is off after a beacon ends",
+    "HW-B1: model retrained on real normal data"
+  ],
+  "stronger_review_required": true
+}

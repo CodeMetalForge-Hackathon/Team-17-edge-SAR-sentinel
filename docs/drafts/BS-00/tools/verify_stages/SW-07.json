@@ -1,0 +1,47 @@
+{
+  "contract": "SW-07",
+  "branch": "codex/SW-07",
+  "base": "main",
+  "attempt_budget": 4,
+  "stall_window": 2,
+  "required_modules": [
+    "numpy",
+    "sklearn",
+    "joblib",
+    "pytest"
+  ],
+  "allowed_paths": [
+    "pi/hailo_hook.py",
+    "pi/hailo_person_app.py",
+    "THIRD_PARTY.md",
+    "TODO.md",
+    "README.md",
+    "docs/evidence/SW-07/*",
+    "docs/drafts/SW-07/*"
+  ],
+  "stages": [
+    {
+      "name": "regression",
+      "tests": [
+        "tests/test_core.py",
+        "tests/test_guardrail_invariants.py",
+        "tests/contract/test_sw00_launcher.py"
+      ],
+      "min_tests": 19,
+      "timeout_s": 180
+    },
+    {
+      "name": "acceptance",
+      "tests": [
+        "tests/contract/test_sw07_hailo_callback.py"
+      ],
+      "min_tests": 6,
+      "timeout_s": 180
+    }
+  ],
+  "physical_outstanding": [
+    "HW-B3: real pipeline publishes bearings on the Pi",
+    "HW-B3: bearing checked against measured positions"
+  ],
+  "stronger_review_required": false
+}

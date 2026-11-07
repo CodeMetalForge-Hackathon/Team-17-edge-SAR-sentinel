@@ -1,0 +1,22 @@
+{
+  "why": "Protect what defines done and what enables flight. Application code stays editable so builders can work; individual safety values in it are pinned in protected_pins.json instead.",
+  "protected_globs": [
+    "tests/test_core.py",
+    "tests/test_guardrail_invariants.py",
+    "tests/contract/*",
+    "tools/*",
+    "tools/verify_stages/*",
+    ".claude/settings.json",
+    ".claude/hooks/*",
+    ".claude/agents/*",
+    "CLAUDE.md",
+    "AGENTS.md",
+    "docs/contracts/*",
+    "requirements.txt",
+    "requirements-dev.txt",
+    ".gitignore",
+    "pi/drone_dispatch.py"
+  ],
+  "forbidden_names": ["conftest.py", "pytest.ini", "tox.ini", "setup.cfg", "pyproject.toml", ".coveragerc"],
+  "forbidden_module_shadows": ["numpy", "pytest", "sklearn", "joblib", "paho", "serial", "cflib", "json", "os", "sys", "math", "time", "hailo"]
+}

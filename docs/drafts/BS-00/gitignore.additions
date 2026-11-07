@@ -1,0 +1,8 @@
+
+# Added by BS-00
+.venv/
+ml/.venv/
+ml/cache/
+demo_assets/images/
+docs/evidence/**/verify-*/*.xml
+docs/evidence/**/verify-*/*.log

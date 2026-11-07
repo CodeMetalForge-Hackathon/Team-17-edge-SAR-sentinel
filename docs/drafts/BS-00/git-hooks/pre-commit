@@ -1,0 +1,16 @@
+#!/bin/sh
+# Copied by a human to .git/hooks/pre-commit. Git's own check, so it also covers agents without Claude Code hooks.
+# `git commit --no-verify` skips it; the verifier's manifest check still catches that afterwards.
+root="$(git rev-parse --show-toplevel)" || exit 1
+if [ ! -f "$root/tools/guardrail_admin.py" ]; then
+    echo "[guardrail] tools/guardrail_admin.py is missing; refusing commit" >&2
+    exit 1
+fi
+# "python" before "python3": on Windows, python3 is often a Microsoft Store stub that runs nothing.
+for py in "$root/.venv/Scripts/python.exe" "$root/.venv/bin/python" python python3; do
+    if command -v "$py" >/dev/null 2>&1 || [ -x "$py" ]; then
+        exec "$py" "$root/tools/guardrail_admin.py" precommit
+    fi
+done
+echo "[guardrail] no Python found; refusing commit" >&2
+exit 1

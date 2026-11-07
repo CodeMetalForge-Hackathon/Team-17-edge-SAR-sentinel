@@ -1,0 +1,51 @@
+{
+  "contract": "ML-03",
+  "branch": "codex/ML-03",
+  "base": "main",
+  "attempt_budget": 4,
+  "stall_window": 2,
+  "required_modules": [
+    "numpy",
+    "sklearn",
+    "joblib",
+    "pytest"
+  ],
+  "allowed_paths": [
+    "pi/recon.py",
+    "pi/dashboard.py",
+    "run_pi.sh",
+    "pi/bus.py",
+    "TODO.md",
+    "README.md",
+    "docs/evidence/ML-03/*",
+    "docs/drafts/ML-03/*"
+  ],
+  "stages": [
+    {
+      "name": "regression",
+      "tests": [
+        "tests/test_core.py",
+        "tests/test_guardrail_invariants.py",
+        "tests/contract/test_sw01_vib_semantics.py",
+        "tests/contract/test_sw03_reset_hazards.py",
+        "tests/contract/test_sw04_freshness_fusion.py",
+        "tests/contract/test_ml02_context.py",
+        "tests/contract/test_sw00_launcher.py"
+      ],
+      "min_tests": 65,
+      "timeout_s": 180
+    },
+    {
+      "name": "acceptance",
+      "tests": [
+        "tests/contract/test_ml03_recon.py"
+      ],
+      "min_tests": 13,
+      "timeout_s": 180
+    }
+  ],
+  "physical_outstanding": [
+    "INT-02: recommendations reorder during the live scenario"
+  ],
+  "stronger_review_required": true
+}
