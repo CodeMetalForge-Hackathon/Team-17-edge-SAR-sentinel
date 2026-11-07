@@ -28,6 +28,12 @@ class Brain:
         bus.subscribe("forge/lidar/change", self.on_change)
         bus.subscribe("forge/vision/person", self.on_person)
         bus.subscribe("forge/node/+/features", self.on_node)
+        bus.subscribe("forge/control/reset", self.on_reset)
+
+    def on_reset(self, topic, p):
+        """Clear hazard zones, recent people, and cooldowns. Use between judges."""
+        self.persons, self.avoid, self.cooldown = [], [], {}
+        print("[brain] RESET: hazard zones, people, and cooldowns cleared")
 
     # ---------- inputs ----------
     def on_scan(self, topic, p):
