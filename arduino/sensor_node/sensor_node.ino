@@ -42,10 +42,13 @@ unsigned long lastOut = 0;
 unsigned long beaconUntil = 0;
 
 // Accumulate between outputs so short events (a tap, a shake) are not missed.
+// vib is 0/1 per 100 ms period ("was the vibration sensor active at all"), NOT a count of loop()
+// passes: loop() runs hundreds of times per period, so a raw count turns one tap into vib=40+.
+// The Pi sums these into vib_hits = 0..10 per 1 s window (tap ~1-2, shake 5+).
 int loudMax = 0;
 long loudSum = 0;
 int loudN = 0;
-int vibHits = 0;
+bool vibSeen = false;
 
 float tempC = NAN, hum = NAN;
 unsigned long lastDht = 0;
@@ -78,7 +81,7 @@ void loop() {
   int loud = analogRead(PIN_LOUD);
   if (loud > loudMax) loudMax = loud;
   loudSum += loud; loudN++;
-  if (digitalRead(PIN_VIB) == VIB_ACTIVE) vibHits++;
+  if (digitalRead(PIN_VIB) == VIB_ACTIVE) vibSeen = true;
 
   // Beacon output
   bool beacon = millis() < beaconUntil;
@@ -98,7 +101,7 @@ void loop() {
     Serial.print("{\"node\":\""); Serial.print(NODE_ID);
     Serial.print("\",\"ms\":"); Serial.print(lastOut);
     Serial.print(",\"pir\":"); Serial.print(digitalRead(PIN_PIR) == HIGH ? 1 : 0);
-    Serial.print(",\"vib\":"); Serial.print(vibHits);
+    Serial.print(",\"vib\":"); Serial.print(vibSeen ? 1 : 0);
     Serial.print(",\"flame\":"); Serial.print(digitalRead(PIN_FLAME) == FLAME_ACTIVE ? 1 : 0);
     Serial.print(",\"water\":"); Serial.print(digitalRead(PIN_WATER) == WATER_ACTIVE ? 1 : 0);
     Serial.print(",\"loud_max\":"); Serial.print(loudMax);
@@ -107,6 +110,6 @@ void loop() {
     if (!isnan(tempC)) { Serial.print(",\"temp\":"); Serial.print(tempC, 1); }
     if (!isnan(hum)) { Serial.print(",\"hum\":"); Serial.print(hum, 1); }
     Serial.println("}");
-    loudMax = 0; loudSum = 0; loudN = 0; vibHits = 0;
+    loudMax = 0; loudSum = 0; loudN = 0; vibSeen = false;
   }
 }

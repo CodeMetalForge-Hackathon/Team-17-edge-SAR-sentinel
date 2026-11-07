@@ -63,6 +63,14 @@ def test_policy_blocks_path_through_hazard():
     assert kind == "SURVIVOR" and acts[0][0] == "ALERT_GROUND"
 
 
+def test_tap_is_survivor_shake_is_structural():
+    # vib arrives as 0/1 per 100 ms period, so vib_hits is 0..10 per window
+    tap = {"vib_hits": 2.0, "loud_max": 700.0, "pir_frac": 0.0}
+    shake = {"vib_hits": 8.0, "loud_max": 200.0, "pir_frac": 0.0}
+    assert decide("node", 1.5, 0.8, [], feat=tap, anomalous=True, node="n1")[0] == "SURVIVOR"
+    assert decide("node", 1.5, 0.8, [], feat=shake, anomalous=True, node="n1")[0] == "STRUCTURAL"
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

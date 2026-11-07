@@ -35,7 +35,7 @@ def node_window(kind="normal", n=10):
             r["flame"] = 1
     elif kind == "shake":
         for r in rs:
-            r["vib"] = 3
+            r["vib"] = 1   # the sketch reports vib as 0/1 per 100 ms period
     elif kind == "water":
         for r in rs:
             r["water"] = 1
