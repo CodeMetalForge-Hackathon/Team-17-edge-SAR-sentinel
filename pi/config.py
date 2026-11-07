@@ -9,7 +9,9 @@ MQTT_HOST = "localhost"   # broker runs on the Pi (sudo apt install mosquitto)
 MQTT_PORT = 1883
 
 # --- Sensor nodes (Arduinos) ---------------------------------------------
-# node_id -> where it sits on the map and which serial port it is on
+# node_id -> where it sits on the map and which serial port it is on.
+# Use /dev/serial/by-id/... paths (ls /dev/serial/by-id/): /dev/ttyUSB0 / ttyACM0 numbering can change
+# between reboots, and the RPLIDAR is also a /dev/ttyUSB* device.
 NODES = {
     "n1": {"x": 1.5, "y": 0.8, "port": "/dev/ttyACM0"},
     # "n2": {"x": 2.2, "y": -1.0, "port": "/dev/ttyACM1"},
@@ -40,6 +42,9 @@ DRONE_PAD = {"x": 0.5, "y": -0.5, "yaw_deg": 0.0}  # where the takeoff pad is on
 DRONE_HEIGHT_M = 0.5
 DRONE_MAX_LEG_M = 3.0      # safety clamp: refuse targets farther than this from the pad
 DRONE_HOVER_S = 3.0
+DRONE_SPEED_MPS = 0.3      # cruise speed for each leg
+DRONE_MIN_VBAT = 3.8       # refuse takeoff below this resting battery voltage (full = 4.2 V)
+DRONE_ESTIMATOR_TIMEOUT_S = 10.0  # max wait for the Kalman estimate to settle before takeoff
 DRONE_DRY_RUN = True       # set False only when organizers are present and the area is clear
 
 # --- Brain / policy -------------------------------------------------------
