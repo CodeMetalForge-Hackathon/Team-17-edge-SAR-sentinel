@@ -1,9 +1,11 @@
 # Project context: Forge 2026, Operation Lost and Found
 
+Last updated: Sat Nov 7, ~15:00. Supersedes the earlier "LiDAR sentinel" context. Read this first, top to bottom.
+
 ## Event
 - Code Metal Forge Hackathon 2026, BASE-X Boston. Team of 4.
 - Mission: search and rescue in dangerous environments with no GPS, cell networks, or fixed comms. Four objectives: locate isolated people, detect life and hazards, map changing conditions, deliver critical info over degraded channels. Brief says pick one, or one hard piece of one.
-- Build window: Sat Nov 7 10:00 to Sun Nov 8 12:00 (hard cutoff). Only work done in this window counts. Git history is the proof, so commit often.
+- Build window: Sat Nov 7 10:00 to Sun Nov 8 12:00 (hard cutoff). Only work done in this window counts. Git history is the proof, so commit small and often.
 - Judging, 25% each: real-world relevance, working live demo, deployability (hardware, power, latency, bandwidth, reliability), ideation. Same criteria in both rounds.
 - Not scored: code cleanliness, pitch polish, production readiness, a finished product. Partial progress on a hard problem still scores.
 - Round 1: table judging, Sun 12:00-14:00, about 15 min with one judge. Round 2: top 5 present for 10 min on the main stage at 14:45. Awards around 16:15.
@@ -11,115 +13,141 @@
 - AI coding tools are allowed. Someone on the team must understand what they wrote.
 - Drones fly only with Code Metal staff present, in daytime. Mentors (including Special Forces operators) are on the floor.
 
-## Hardware available
-- Raspberry Pi 5 with AI HAT (Hailo) and Pi camera
-- RPLIDAR C1 and S2 (2D). Livox MID-360 is shared, so we don't depend on it
-- Arduino boards
-- Seeed Grove Creator Kit: Mini PIR, sound and loudness, flame, vibration (SW-420), 3-axis accelerometer, water, moisture, light, DHT11 temp/humidity, ultrasonic ranger, buzzer, LEDs, LED bar, RGB stick, LCD, IR emitter/receiver, and more
-- Crazyflie 2.1+ (needs a Flow deck v2 and a Crazyradio; confirm at the kit table). Whoop FPV drones exist but aren't easily programmable, so we don't use them
-- Limited Jetson Nanos and one shared Jetson Thor (not used)
+## The project (after the Sat 14:45 pivot)
+**One-liner:** HQ sees the area from above before and after a disaster, plans a safe route, sends a ground robot to inspect, and shows responders one live map of debris, hazards and people. No GPS, no internet.
 
-## The project
-**One-liner:** a Pi maps the area with LiDAR, detects anomalies on-device from LiDAR, camera, and sensor nodes, and dispatches a drone to the anomaly's location, with no GPS.
+**Core loop:**
+1. **Aerial image -> road map.** An overhead image of the sandbox is lined up to our grid using 4 corner markers. HQ compares it with the "before" image square by square; changed squares are blocked.
+2. **Route.** HQ plans the robot's route around blocked and hazard squares (A* on the grid).
+3. **Inspect.** The robot drives the route square by square and reads its sensors (survivor signs, flame, gas stand-in, etc.), sending `{square, readings}` back to HQ.
+4. **Dashboard.** HQ shows everything live: before/after, blocked squares, hazards, robot position and path, findings ("person D2", "flame E3").
 
-**Plain version:** a watch station with a laser scanner that knows what the empty space looks like, a camera with an AI chip that spots people, and small sensor boxes that listen for tapping, feel shaking, and detect motion, fire, and water. The Pi learns what normal looks like, flags unusual events, works out what kind of situation it is, and responds:
-- Someone needs help: send the drone to them and buzz a beacon near them so they know help is coming.
-- Fire, flooding, or possible collapse: mark the area as no-go and alert the human team.
-- Someone stuck inside a dangerous area, or the drone's path crosses one: hold the drone and alert humans instead.
-- New debris: update the map.
+**Aerial source, in order:**
+- **Now: a stand-in aerial camera** on a pole (~1.2 m above the sandbox), taking a snapshot every 30 s.
+- **Later, if time: the Crazyflie** (we have one) as the real aerial asset. It only gets a camera with an AI deck (not confirmed). The mapping code is the same for any image source, since every image is lined up by the corner markers.
 
-Everything runs on the device. No internet, GPS, or cell network needed.
+**What we say to judges:** "In the field the aerial image comes from a drone or tethered drone. We didn't get the drone working this weekend, so this camera stands in for it. HQ treats it exactly like drone imagery: a photo every 30 s, lined up by the corner markers. Swap in a drone and nothing downstream changes." Keep this true: run the stand-in on a 30 s snapshot cycle, and line up every frame with the markers.
+
+## Demo flow (~5 min of the 15)
+1. Before: HQ captures the empty sandbox from above and calibrates from the corner markers.
+2. Event: boxes dropped as debris, IR remote at the flame sensor as fire, a "victim" in a square.
+3. Survey: next aerial snapshot; HQ marks changed squares as blocked.
+4. Route: HQ plans start -> target around blocked/hazard squares, sends it to the robot.
+5. Inspect: robot drives square by square, reports readings; findings appear on the map.
+6. Judge moves a box or triggers a sensor; map and route update.
+
+Fallbacks: hand-carried sensor box along the planned route (if the robot isn't ready), `simulate.py` through the real brain, recorded videos of each step.
+
+## Coordinate grid (we define the coordinates)
+- Sandbox 1.5 m x 1.0 m, taped grid of 25 cm squares: columns A-F, rows 1-4 (24 squares). Confirm square size against the robot's footprint.
+- Grid frame: origin at the outer corner of A1, +x along columns A->F, +y along rows 1->4, meters. Square centre A1 = (0.125, 0.125), F4 = (1.375, 0.875).
+- 4 ArUco markers (DICT_4X4_50) at the sandbox corners map image pixels to meters. Print large enough to be detected from the camera height (~10 cm for the Pi camera; ~20 cm if the AI-deck drone camera is used).
+- 1 ArUco marker on top of the robot (its position and heading).
+- Drone pad square and robot start square are marked on the tape.
 
 ## Key design decisions and why
-- **No synthetic labeled dataset.** The original idea was a generated event CSV with yes/no anomaly labels. Dropped because the model would just learn our generator, and judges would ask who labeled the anomalies. Anomalies now come from real sensors, with models fit only on normal data.
-- **No SLAM.** The LiDAR stays in one spot as a sentinel, so its own frame is the map. This removes a whole risky component.
-- **GPS-free localization.** Camera gives the direction to a person, and LiDAR gives the distance in that direction. Together they place the person on the map with no GPS and no depth camera.
-- **Crazyflie, not the whoops.** It has a clean Python API (cflib) and can fly to relative positions with a Flow deck.
-- **Two-layer anomaly model.** Plain IsolationForest missed taps and can't see sensors that never vary in normal data (flame, water, PIR). So a per-sensor robust z-score sits alongside it and also reports which sensor triggered.
-- **Rule-based response policy.** Easy to explain to a judge and easy to tune after talking to operators.
-- **Sensors on Arduinos, not the Pi.** The Pi has no ADC for the analog Grove sensors. Separate nodes also give a better deployability story: cheap sensor nodes in the field, Pi as the edge brain.
+- **Fixed coordinates, no GPS, no SLAM.** Removes localization as a risk; everything is a named square.
+- **Overhead image as the mapper** (not the LiDAR). A 2D LiDAR sees one horizontal slice from one spot (shadows behind objects); from above it would see one line, not an area. The overhead image sees the whole sandbox.
+- **Corner markers on every image.** Any aerial source (pole camera, drone) gets lined up the same way, so drone drift doesn't matter.
+- **Robot carries the close-up sensors** (what a camera can't see: flame, gas, a survivor's sound/motion).
+- **Rule-based response policy** in the brain: easy to explain and tune.
+- **Everything on the Pi** with a local MQTT broker and the Pi's own Wi-Fi hotspot for the robot.
+- **Earlier decisions still valid:** no synthetic labelled dataset (anomalies from real sensors, models fit on normal data only); two-layer anomaly model (robust z-score per feature + IsolationForest).
 
-## Coordinate frame
-- Map frame = LiDAR frame. Origin at the LiDAR center, +x = LiDAR 0 degrees (forward), +y = 90 degrees counter-clockwise (left), meters.
-- RPLIDAR angles increase clockwise, so `LIDAR_ANGLE_SIGN = -1`. Flip it if left and right look mirrored.
-- Camera sits next to the LiDAR, aimed along its 0 degrees. Use `CAMERA_ANGLE_OFFSET_DEG` if not.
-- Node and drone pad positions are tape-measured into `pi/config.py`.
+## Hardware
+| Item | Use | Status |
+|---|---|---|
+| Raspberry Pi 5 + AI HAT (Hailo) | HQ: broker, brain, mapping, planner, dashboard; Hailo person detection optional | Set up (broker, venv, tests pass) |
+| Pi Camera (Module 3 Wide preferred, ~102 deg) or USB webcam | Stand-in aerial camera on a pole | Connecting now |
+| Robot with Arduino UNO Q | Drives the route, carries Grove sensors | Chassis/motors/encoders not confirmed |
+| Crazyflie 2.1+ (+ Flow deck v2, Crazyradio) | Aerial asset later; camera only with an AI deck | Have the Crazyflie; decks to confirm |
+| RPLIDAR C1/S2 (2D) | Optional cross-check of blocked squares at floor level | Rohan |
+| Seeed Grove kit | PIR, loudness, flame, vibration, water, light, DHT11, buzzer, LED, ... | No gas sensor in the kit list; gas needs a stand-in unless an MQ-type sensor turns up |
+| BetaFPV Aquila16 | Not used (hand-flown, analog video, not programmable) | Dropped |
 
-## Repo layout (forge-sar)
-- `arduino/sensor_node/sensor_node.ino`: reads Grove sensors and prints one JSON line every 100 ms: `{node, ms, pir, vib, flame, water, loud_max, loud_mean, light, temp?, hum?}`. Accepts `B` (beacon: buzzer + LED for 2 s) and `A` (ack blink). Pins: D2 PIR, D3 vibration, D4 flame, D5 water, D6 buzzer, D7 LED, A0 loudness, A1 light, D8 DHT11 (optional). Check the `*_ACTIVE` polarity settings on real boards.
-- `pi/config.py`: positions, thresholds, ports, drone settings.
-- `pi/bus.py`: MQTT bus (paho-mqtt v2) plus an in-process bus for sims and tests. Topic docs at the top.
-- `pi/features.py`: 1 s of node readings becomes 11 features: loud_max, loud_mean, loud_std, light_mean, light_delta, pir_frac, vib_hits, flame_any, water_any, temp, hum.
-- `pi/node_bridge.py`: Arduino serial to feature windows to MQTT. Relays beacon commands. `--log` writes `normal_features.csv` for training.
-- `pi/lidar_node.py`, `pi/lidar_change.py`: reads the Slamtec SDK `ultra_simple` output, builds a baseline from about 10 s of empty-scene scans, and detects changes. A bin counts as changed if something is 0.25 m or more closer than baseline. Blobs must be at least 3 degrees wide and persist for 3 scans, and each is emitted once. Publishes the full scan at 2 Hz. C1 baud 460800, S2 1000000.
-- `pi/hailo_hook.py`: converts a person's bounding-box center to a bearing using the camera's field of view, and publishes it. Must be called from the hailo-apps detection callback (check method names against the example you clone).
-- `pi/anomaly.py`: robust z-score per feature (Z_THRESH = 6, tail-calibrated so 99.9% of normal windows pass) plus IsolationForest (threshold = 99.9th percentile of training scores + 0.02). Anomalous if either fires. `assess(x)` returns `(score, anomalous, top_feature)`. Simulated results: about 0.2% false alarms per window; tap, shake, flame, and water all flagged.
-- `pi/policy.py`: rules in this order:
-  1. Flame: FIRE (avoid zone + alert)
-  2. Water: FLOOD (avoid zone)
-  3. Anomaly with 5+ vibration hits: STRUCTURAL (avoid zone + alert)
-  4. Person seen, person near a node, or anomaly with PIR or loudness spike: SURVIVOR. Beacon the node. If inside an avoid zone or the straight pad-to-target path crosses one, alert ground and hold the drone; otherwise dispatch the drone.
-  5. LiDAR change with no person: OBSTRUCTION (update map)
-  6. Anything else anomalous: LOG
-  Avoid zones are 0.7 m circles.
-- `pi/brain.py`: subscribes to everything, fuses person bearing with LiDAR range, scores node windows, applies the policy. 15 s cooldown per event type per 0.5 m grid cell. Publishes events and actions, and sends beacon commands.
-- `pi/drone_dispatch.py`: converts map coordinates to the drone's takeoff frame (subtract pad position, rotate by pad heading), since the Flow deck only knows motion relative to takeoff. Refuses targets over 3 m away. Takes off to 0.5 m, flies there at 0.3 m/s, hovers 3 s, returns, lands. Dry run by default.
-- `pi/simulate.py`: simulated room, nodes, LiDAR, and person, with a 7-step scenario. `--local` runs everything in one process with no broker. Without it, it publishes to MQTT as a hardware fallback.
-- `pi/dashboard.py`: live map (LiDAR outline, nodes, pad, events, hazard zones, dispatch arrows, response log). `--sim-snapshot` saves a PNG.
-- `pi/reset.py`: clears hazard zones, events, and cooldowns between judges (or press R in the dashboard).
-- `run_pi.sh`: starts everything on the Pi. Modes: default (hardware, drone dry run), `sim`, `fly`, `baseline`. Logs go to `logs/`.
-- `mac/sync_to_pi.sh`: copies code from the laptop to the Pi without touching the Pi's venv, model, or baseline.
-- `mac/dashboard.sh`: runs the dashboard on the laptop against the Pi's broker (sets `FORGE_MQTT_HOST`).
-- `tests/test_core.py`: 6 tests, all passing.
-- `README.md` (setup, owners, demo script) and `THIRD_PARTY.md` (what existed before: Slamtec SDK, hailo-apps, cflib, PyPI libraries).
+**Arduino UNO Q notes:** two processors (Linux MPU + STM32 MCU). `Serial` goes through the Router Bridge to its own Linux side, not to USB. Header UART = `Serial1` on D0/D1, 3.3 V. On a moving robot, use its Linux side + Wi-Fi to reach the Pi's broker (no cable).
 
-## MQTT contract (don't change payloads without telling the integration owner)
+**Pi camera notes:** Pi 5 needs the Pi 5 camera cable (22-pin). Check with `rpicam-hello --list-cameras`, test with `rpicam-still -o test.jpg --nopreview`. `picamera2` is a system package: the venv needs `--system-site-packages`, or run camera code with system `python3`.
+
+## System and messages
+Pi HQ runs mosquitto. Existing topics stay; new topics are proposed (owner: Pratik).
+
+Existing:
 - `forge/node/<id>/features`: `{node, x, y, ts, features{...}}`
 - `forge/node/<id>/cmd`: `{cmd: "beacon" | "ack"}`
-- `forge/lidar/scan`: `{ts, ranges_m[360]}` (index = map degree counter-clockwise, null = no return)
-- `forge/lidar/change`: `{ts, x, y, bearing_deg, range_m, width_deg, size_m}`
+- `forge/lidar/scan`: `{ts, ranges_m[360]}`, `forge/lidar/change`: `{ts, x, y, bearing_deg, range_m, width_deg, size_m}`
 - `forge/vision/person`: `{ts, bearing_deg, conf}`
 - `forge/event`: `{id, ts, kind, x, y, score, anomalous, source, detail}`
 - `forge/action`: `{event_id, ts, action, x, y, reason, avoid_zones[]}`
 - `forge/drone/status`: `{event_id, ok, ts}`
+- `forge/control/reset`: `{ts}` (dashboard R key / `reset.py`)
+
+New (proposed):
+- `forge/map/grid`: `{ts, cols, rows, cell_m, blocked[], hazards[]}` (squares as "C3")
+- `forge/map/snapshot`: `{ts, kind: "before" | "after", path}`
+- `forge/robot/plan`: `{ts, start, goal, waypoints[]}`
+- `forge/robot/status`: `{ts, x, y, heading_deg, cell, state}`
+- `forge/robot/cmd`: `{cmd: "go" | "stop", cell}`
+- `forge/robot/reading`: `{ts, cell, readings{pir, flame, gas?, loud_max, ...}}`
+
+## Repo (github.com/CodeMetalForge-Hackathon/Team-17)
+Branches: `main` (initial bulk commit only), `pratik` (PR #1 open: run_pi.sh, reset, mac scripts), `Dhrubo` (drone + node fixes + UNO Q + Pratik's branch merged + owners), `Rohan`. Nothing merged to `main` yet: merge PR #1, then `Dhrubo`, so the Pi runs one codebase.
+
+Existing files, status in the pivot:
+- `pi/bus.py` MQTT + in-process bus. Reused.
+- `pi/brain.py`, `pi/policy.py`, `pi/anomaly.py`, `pi/features.py`: events, hazards, anomaly model. Reused; robot readings feed them.
+- `pi/dashboard.py`: live map, R to reset. Reused; needs grid layers and before/after.
+- `pi/drone_dispatch.py` (+ preflight: Flow deck, battery >= 3.8 V, Kalman reset; safe landing on errors; `--leg FWD LEFT`) and `pi/drone_check.py` (`--scan`, check, `--flow`, `--hover`). For the Crazyflie stage later.
+- `arduino/sensor_node/sensor_node.ino`: sensor sketch. vib reported 0/1 per 100 ms (fixes tap-reads-as-STRUCTURAL). Output on `NODE_SERIAL` (`Serial1` for UNO Q). Basis for the robot's sensor code.
+- `pi/node_bridge.py`: serial -> features -> MQTT; `--raw`, `--port`, NODE_ID check, log flush. Pratik may use his own code instead.
+- `pi/lidar_node.py`, `pi/lidar_change.py`: LiDAR change detection (optional cross-check).
+- `pi/hailo_hook.py`: person bearing from Hailo (optional now).
+- `pi/simulate.py`, `tests/test_core.py` (7 tests pass), `run_pi.sh` (modes: default, sim, fly, baseline), `pi/reset.py`, `mac/*.sh`.
+- `.gitattributes` keeps `*.sh` LF on Windows checkouts.
+
+Planned new code (not written yet):
+- `pi/grid.py`: square names <-> meters, A* route around blocked/hazard squares.
+- `pi/overhead.py`: capture (Pi camera / webcam / image file / drone frame) every 30 s, corner-marker calibration, flattened top-down map, before/after per square -> blocked, robot marker -> position, publish grid/status/plan.
+- Robot: driving code (go to next square) and Wi-Fi bridge from the UNO Q's Linux side to the Pi broker.
+- Dashboard: grid layers, before/after view, robot path, findings.
+
+## Pi access
+- User `khoj`, LAN `10.1.200.210`, Tailscale `100.119.240.31`. Code in `~/forge-sar` (synced from Pratik's Mac with `mac/sync_to_pi.sh`, not a git checkout). Venv at `~/forge-sar/.venv`.
+- Tailscale is for development only: the demo must not depend on internet.
 
 ## Roles
-- **A, LiDAR:** build the Slamtec SDK, get `ultra_simple` scanning, record the baseline, produce live change events.
-- **B, vision and nodes:** flash the Arduino sketch, check JSON and sensor polarity, get Hailo person detection hooked into `hailo_hook.py`.
-- **C, drone:** Flow deck and Crazyradio, hover with Bitcraze's `motion_commander_demo.py`, then `drone_dispatch.py`. Book a supervised flight slot and record a flight clip Saturday.
-- **D (Pratik), brain and integration:** broker, brain, policy, anomaly model, dashboard. Swap real modules in for the simulator one at a time.
+| Who | Owns |
+|---|---|
+| Dhrubo | Aerial mapping (`overhead.py`, calibration, before/after), A* planner, Crazyflie stage later, vision (Hailo, optional) |
+| Pratik | Brain + integration, dashboard, `run_pi.sh`, sensor nodes / robot sensors and its link to HQ |
+| Rohan | LiDAR (optional cross-check); spare hands for robot driving |
+| Chaitanya | Hardware: robot chassis/motors, camera mount, sandbox + tape grid + markers, flight spotting |
+| Not owned yet | Robot driving code (go to a square -> motor commands) |
 
-## Status as of Sat ~13:00
-- Full pipeline written and passing in simulation. Code pushed to the team GitHub repo.
-- Pi set up: broker running, environment installed, tests and simulation pass on the Pi. Launcher, reset, and sync scripts added.
-- Nothing tested on real hardware yet.
+## Known issues to fix
+- **Survivor false trigger (Pratik, policy/anomaly):** any anomalous window + any PIR blip = SURVIVOR, even if the anomaly came from slow drift (light level, temp). Fix: drop `temp`, `hum`, `light_mean` from model inputs; SURVIVOR only when the trigger itself is PIR or loudness. Applies to robot readings too.
+- **Hazard zones pile up** while a flame persists (reset between judges exists; merge overlapping zones).
+- **Lighting:** shadows look like change in the before/after compare; steady light, per-square tolerance, retake "before" right before each run.
+- **Git on Windows:** commit with the GitHub noreply email (`50300187+dhrubo404@users.noreply.github.com`), or pushes are rejected.
 
 ## Timeline
-- Sat 12:00-18:00: get each risky piece working on its own, in parallel
-- Sat 18:00-02:00: thinnest end-to-end path on real hardware
-- Sun 02:00-08:00: harden; demo must run 3 times in a row
-- Sun 08:00-11:00: feature freeze, retrain the anomaly model on real normal data at our table (venue noise), record backup videos, rehearse
-- Sun 11:00-12:00: final push, submit before 12:00
+- Sat 14:45-18:00: each piece alone (camera on Pi + calibration + before/after; robot drives one square; A* planner; Crazyflie hover if time).
+- Sat 18:00-02:00: one full run: aerial map -> route -> robot -> readings on the dashboard.
+- Sun 02:00-08:00: harden; demo 3x in a row; backup videos.
+- Sun 08:00-11:00: feature freeze; retake "before" at our table; Crazyflie stage only if everything else is solid (daylight + staff); rehearse.
+- Sun 11:00-12:00: final push, submit before 12:00.
 
-## Open TODOs
-- Ask an operator mentor what they'd do with an automatic survivor alert, and fold the answer into the policy
-- Record a supervised Crazyflie flight clip
-- Retrain per node if the nodes sit in very different noise environments
+## Open questions
+- Robot hardware: wheels, motor driver, encoders? Who writes the driving code?
+- Gas: real MQ-type sensor, or a stand-in?
+- Camera: Pi Camera Module 3 Wide on a long ribbon, or USB webcam? Mount?
+- Grid: 25 cm squares OK for the robot?
+- Can the UNO Q's Linux side join the Pi's hotspot and reach the broker?
+- Does the Crazyflie have an AI deck? (needed for drone images)
+- Operator mentor feedback on the new flow.
 
 ## Known gaps (be upfront with judges)
-- The drone flies straight lines; no path planning around hazard zones
-- Flow deck drift: expect about 10-30 cm error at the target
-- Person placement assumes the camera points along LiDAR 0 degrees
-- One anomaly model is shared across all nodes
-- Event "score" means different things by source (z-score ratio, YOLO confidence, blob size), so scores aren't comparable across sources
-
-## Demo plan
-- Setup: a cardboard-walled area about 1 m x 1.5 m. Pi, LiDAR and camera at one end, two nodes inside, a taped drone pad, dashboard on a screen facing the judge.
-- Scenes:
-  1. Tap near node 1: survivor, beacon, drone arrow, plus the recorded flight clip
-  2. IR remote at node 2's flame sensor: fire zone appears
-  3. Teammate walks into camera view inside the fire zone: drone held, ground team alerted. This is the key "judgment call" moment.
-  4. Drop a box: obstruction
-  5. Let the judge tap or shake a node themselves
-- Fallbacks: `simulate.py` through the real brain and map, the recorded flight clip, and a full recorded run.
-- Finals (10 min): 1 min problem, 1 min how it works, 5 min demo, 1 min deployability, 1 min what's next, 1 min buffer.
+- Aerial camera is a stand-in for a drone (see wording above).
+- Robot position between snapshots comes from driving square by square; drift corrected at each snapshot.
+- Straight 4-connected routes on a 25 cm grid; no fine motion planning.
+- Gas sensing is a stand-in unless a real gas sensor is found.
