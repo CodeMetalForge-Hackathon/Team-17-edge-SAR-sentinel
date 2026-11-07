@@ -53,10 +53,12 @@ Then retrain on real data: `python node_bridge.py n1 --log` for ~5 min of normal
 
 | Module | Files | Owner |
 |---|---|---|
-| A. LiDAR | `lidar_node.py`, `lidar_change.py` | |
-| B. Vision + nodes | `hailo_hook.py`, `arduino/`, `node_bridge.py` | |
-| C. Drone | `drone_dispatch.py` | |
-| D. Brain + integration | `brain.py`, `anomaly.py`, `policy.py`, `dashboard.py`, `simulate.py` | |
+| A. LiDAR | `lidar_node.py`, `lidar_change.py` | Rohan |
+| B1. Vision | `hailo_hook.py` | Dhrubo |
+| B2. Sensor nodes | `arduino/`, `node_bridge.py` | Pratik |
+| C. Drone | `drone_dispatch.py`, `drone_check.py` | Dhrubo |
+| D. Brain + integration | `brain.py`, `anomaly.py`, `policy.py`, `dashboard.py`, `simulate.py`, `run_pi.sh` | Pratik |
+| Hardware support | wiring, demo area build, positions, flight spotting | Chaitanya |
 
 Message topics and payloads are documented at the top of `pi/bus.py`. Don't change a payload without telling the integration owner.
 
