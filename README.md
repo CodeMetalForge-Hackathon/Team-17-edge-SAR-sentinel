@@ -25,7 +25,16 @@ python dashboard.py --sim-snapshot    # renders dashboard_sim.png
 python ../tests/test_core.py          # unit tests
 ```
 
-On the Pi with hardware:
+Day-to-day (scripts):
+
+```bash
+bash mac/sync_to_pi.sh            # on the Mac: copy latest code to the Pi
+~/forge-sar/run_pi.sh baseline    # on the Pi: record empty-scene LiDAR baseline (once, or after anything moves)
+~/forge-sar/run_pi.sh             # on the Pi: start everything that's plugged in (sim | fly also available)
+bash mac/dashboard.sh             # on the Mac: live map. Press R to reset between judges
+```
+
+Manual, module by module, on the Pi with hardware:
 
 ```bash
 sudo apt install -y mosquitto && sudo systemctl enable --now mosquitto
