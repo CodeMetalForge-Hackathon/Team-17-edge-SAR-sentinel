@@ -16,6 +16,12 @@
 // Polarity: open Serial Monitor, trigger each sensor, and flip the *_ACTIVE define if it reads backwards.
 
 #define NODE_ID "n1"
+
+// Which UART carries the JSON lines to the Pi.
+//   Arduino UNO Q: Serial1 = header pins D0 (RX) / D1 (TX), 3.3 V logic. Wire straight to the Pi's GPIO UART.
+//                  (Serial on the UNO Q goes through the Router Bridge to its own Linux side, not to a cable.)
+//   Classic Uno / Nano over USB: Serial
+#define NODE_SERIAL Serial1
 #define USE_DHT 0
 
 #define PIN_PIR 2
@@ -54,7 +60,7 @@ float tempC = NAN, hum = NAN;
 unsigned long lastDht = 0;
 
 void setup() {
-  Serial.begin(115200);
+  NODE_SERIAL.begin(115200);
   pinMode(PIN_PIR, INPUT);
   pinMode(PIN_VIB, INPUT);
   pinMode(PIN_FLAME, INPUT);
@@ -67,8 +73,8 @@ void setup() {
 }
 
 void handleCommands() {
-  while (Serial.available()) {
-    char c = Serial.read();
+  while (NODE_SERIAL.available()) {
+    char c = NODE_SERIAL.read();
     if (c == 'B') beaconUntil = millis() + 2000;
     if (c == 'A') { digitalWrite(PIN_LED, HIGH); delay(80); digitalWrite(PIN_LED, LOW); }
   }
@@ -98,18 +104,18 @@ void loop() {
 
   if (millis() - lastOut >= PERIOD_MS) {
     lastOut = millis();
-    Serial.print("{\"node\":\""); Serial.print(NODE_ID);
-    Serial.print("\",\"ms\":"); Serial.print(lastOut);
-    Serial.print(",\"pir\":"); Serial.print(digitalRead(PIN_PIR) == HIGH ? 1 : 0);
-    Serial.print(",\"vib\":"); Serial.print(vibSeen ? 1 : 0);
-    Serial.print(",\"flame\":"); Serial.print(digitalRead(PIN_FLAME) == FLAME_ACTIVE ? 1 : 0);
-    Serial.print(",\"water\":"); Serial.print(digitalRead(PIN_WATER) == WATER_ACTIVE ? 1 : 0);
-    Serial.print(",\"loud_max\":"); Serial.print(loudMax);
-    Serial.print(",\"loud_mean\":"); Serial.print(loudN ? loudSum / loudN : 0);
-    Serial.print(",\"light\":"); Serial.print(analogRead(PIN_LIGHT));
-    if (!isnan(tempC)) { Serial.print(",\"temp\":"); Serial.print(tempC, 1); }
-    if (!isnan(hum)) { Serial.print(",\"hum\":"); Serial.print(hum, 1); }
-    Serial.println("}");
+    NODE_SERIAL.print("{\"node\":\""); NODE_SERIAL.print(NODE_ID);
+    NODE_SERIAL.print("\",\"ms\":"); NODE_SERIAL.print(lastOut);
+    NODE_SERIAL.print(",\"pir\":"); NODE_SERIAL.print(digitalRead(PIN_PIR) == HIGH ? 1 : 0);
+    NODE_SERIAL.print(",\"vib\":"); NODE_SERIAL.print(vibSeen ? 1 : 0);
+    NODE_SERIAL.print(",\"flame\":"); NODE_SERIAL.print(digitalRead(PIN_FLAME) == FLAME_ACTIVE ? 1 : 0);
+    NODE_SERIAL.print(",\"water\":"); NODE_SERIAL.print(digitalRead(PIN_WATER) == WATER_ACTIVE ? 1 : 0);
+    NODE_SERIAL.print(",\"loud_max\":"); NODE_SERIAL.print(loudMax);
+    NODE_SERIAL.print(",\"loud_mean\":"); NODE_SERIAL.print(loudN ? loudSum / loudN : 0);
+    NODE_SERIAL.print(",\"light\":"); NODE_SERIAL.print(analogRead(PIN_LIGHT));
+    if (!isnan(tempC)) { NODE_SERIAL.print(",\"temp\":"); NODE_SERIAL.print(tempC, 1); }
+    if (!isnan(hum)) { NODE_SERIAL.print(",\"hum\":"); NODE_SERIAL.print(hum, 1); }
+    NODE_SERIAL.println("}");
     loudMax = 0; loudSum = 0; loudN = 0; vibSeen = false;
   }
 }

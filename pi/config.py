@@ -13,7 +13,7 @@ MQTT_PORT = 1883
 # Use /dev/serial/by-id/... paths (ls /dev/serial/by-id/): /dev/ttyUSB0 / ttyACM0 numbering can change
 # between reboots, and the RPLIDAR is also a /dev/ttyUSB* device.
 NODES = {
-    "n1": {"x": 1.5, "y": 0.8, "port": "/dev/ttyACM0"},
+    "n1": {"x": 1.5, "y": 0.8, "port": "/dev/ttyAMA0"},   # UNO Q wired to the Pi 5 GPIO UART (pins 8/10)
     # "n2": {"x": 2.2, "y": -1.0, "port": "/dev/ttyACM1"},
 }
 SERIAL_BAUD = 115200
