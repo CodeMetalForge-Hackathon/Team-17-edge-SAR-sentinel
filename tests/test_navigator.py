@@ -1342,7 +1342,7 @@ def _slow_camera(w, delay=0.12):
 
 
 def _dwell_log(m):
-    return [x for x in m.log if "collecting (placeholder" in x]
+    return [x for x in m.log if "collecting sensor data (" in x]
 
 
 def test_new_object_during_a_leg_interrupts_is_inspected_and_unfinished_work_resumes():

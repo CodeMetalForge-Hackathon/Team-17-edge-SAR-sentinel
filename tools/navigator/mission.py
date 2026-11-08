@@ -37,14 +37,14 @@ DRIFT_MM = 40.0                # the rover moving this far during the dwell inva
 MOVE_MM = 45.0                 # the structure's centre moving this far during the dwell invalidates it
 LOST_S = 1.5                   # tracking invalid for this long aborts the dwell
 MAX_ATTEMPTS = 3
-MIN_UNKNOWN_CELLS = 5          # a no-depth-only structure (dark/shiny object) needs at least this many cells
+MIN_UNKNOWN_CELLS = int(os.environ.get("FORGE_MIN_UNKNOWN_CELLS", "5"))  # env override: small dark/shiny objects give few no-depth cells;          # a no-depth-only structure (dark/shiny object) needs at least this many cells
 RING_FRAC = 0.06               # width of the candidate ring (sandbox heights) beyond the planned gap
 SCENE_PERIOD_S = 5.0           # full-scene acquisition period (start to start); the map-age limit is 10 s
 INVALID_MAX_S = 12.0           # no valid (rover-identified) scene for this long is a terminal tracking failure
 MAX_EVENTS = 12                # per mission: a scene that keeps changing cannot starve the rest of the work forever
 MAX_MOVES_CHASED = 3           # an inspected object that keeps moving is reported, not chased for ever
 LIVE = ("pending", "visiting", "collecting")
-STATUS_TEXT = {"pending": "waiting", "visiting": "driving there", "collecting": "collecting (placeholder)",
+STATUS_TEXT = {"pending": "waiting", "visiting": "driving there", "collecting": "collecting sensor data",
                "complete": "visited", "unreachable": "unreachable", "cancelled": "not visited (mission cancelled)",
                "failed": "not visited (failure)", "gone": "gone (removed before inspection)"}
 
@@ -616,8 +616,9 @@ class SceneMonitor:
 
 # ------------------------------------------------------------------------------------------- mission
 class Mission:
-    def __init__(self, nav, dwell_s=DWELL_S, gap_mm=GAP_MM, poll_s=0.4, scene_period=SCENE_PERIOD_S):
+    def __init__(self, nav, dwell_s=DWELL_S, gap_mm=GAP_MM, poll_s=0.4, scene_period=SCENE_PERIOD_S, sensors=None):
         self.nav, self.per = nav, nav.p
+        self.sensors = sensors                         # sensor_tag.SensorTagger: tags UNO Q readings with S1/E1 during dwells
         self.dwell_s, self.gap_mm, self.poll_s = float(dwell_s), float(gap_mm), poll_s
         self.scene_period = float(scene_period)
         self.book = StructureBook()
@@ -665,11 +666,15 @@ class Mission:
 
     def snapshot(self):
         c = self.per.calib
+        life = self.sensors.results() if self.sensors is not None else {}
+        structures = [s.public(c) for s in self.book.items if not (s.gone and s.status == "gone")]
+        events = [e.public(c) for e in list(self.events.items)]
+        for d in structures + events:
+            d["life"] = life.get(d["label"])          # {p, verdict, reasons, final} from model/survivor.py, or None
         return {"state": self.state, "message": self.message, "active": self.active,
                 "countdown": None if self.countdown is None else round(self.countdown, 1),
                 "dwell_s": self.dwell_s, "gap_mm": self.gap_mm, "log": self.log[-8:],
-                "structures": [s.public(c) for s in self.book.items if not (s.gone and s.status == "gone")],
-                "events": [e.public(c) for e in list(self.events.items)], "scene": self.scene_info(),
+                "structures": structures, "events": events, "scene": self.scene_info(),
                 "phase": self.phase, "interruptions": self.interruptions}
 
     def overlay_key(self):
@@ -910,8 +915,10 @@ class Mission:
                 return "interrupted"                   # a change was registered before collection could start
             self.phase = "dwell-E" if is_ev else "dwell-S"
             st.status = "collecting"
-            self._log("%s: collecting (placeholder, %.0f s)" % (st.label, self.dwell_s))
+            self._log("%s: collecting sensor data (%.0f s)%s" % (st.label, self.dwell_s, "" if self.sensors else " [sensor link off]"))
         try:
+            if self.sensors is not None:
+                self.sensors.begin(st.label, "event" if is_ev else "structure", st.cx, st.cy, c.aspect, hm)
             p0 = arrival["pose"]
             c0 = arrival["centre"]
             rev0 = st.revision if is_ev else None
@@ -961,6 +968,8 @@ class Mission:
                     return "scene updates stalled (map %.0f s old)" % mon.age()
                 time.sleep(self.poll_s)
         finally:
+            if self.sensors is not None:
+                self.sensors.end()                     # stop tagging however the dwell ended (complete, interrupted, aborted)
             with self.elock:
                 self.phase = "idle"
 

@@ -47,6 +47,7 @@ select{background:#0d1117;color:var(--tx);border:1px solid #30363d;border-radius
   <div class="row"><label><input type="checkbox" id="arm"> Arm motion</label></div>
   <div class="row"><button id="start">START</button></div>
   <button id="stop">STOP (space)</button>
+  <button id="restart" style="margin-top:8px;width:100%;background:#30363d;color:#e6edf3;border:1px solid #484f58;border-radius:6px;padding:8px;cursor:pointer">RESTART (fresh mission: stops the rover, clears structures and P(life))</button>
  </div>
  <div class="pn"><h3>Structure visits</h3>
   <div class="row"><label>collect seconds <input type="number" id="mdw" value="15" min="1" max="120" style="width:60px"></label>
@@ -55,6 +56,10 @@ select{background:#0d1117;color:var(--tx);border:1px solid #30363d;border-radius
   <div id="mstat" style="color:var(--mu);min-height:18px"></div>
   <div id="mcount" style="font-weight:600"></div>
   <div id="mlist" style="font-size:13px"></div>
+ </div>
+ <div class="pn"><h3>Chance of life per structure (UNO Q sensors)</h3>
+  <div id="lstat" style="color:var(--mu);font-size:12px;min-height:16px"></div>
+  <table id="ltab" style="width:100%;border-collapse:collapse;font-size:14px"></table>
  </div>
  <div class="pn"><h3>Scene changes (new / moved objects)</h3>
   <div id="sstat" style="color:var(--mu);font-size:12px;min-height:16px"></div>
@@ -129,7 +134,13 @@ function ui(){
    $("mstart").disabled=!(n.armed&&!run&&n.state!=="running"&&s.pose);$("mstart").textContent=run?"MISSION RUNNING...":"START MISSION (arm first)";
    $("mstat").textContent="mission: "+ms.state+(ms.message?" - "+ms.message:"")+"  ("+ms.structures.length+" structure"+(ms.structures.length==1?"":"s")+")";
    const act=ms.structures.find(x=>x.id===ms.active&&x.status==="collecting");
-   $("mcount").textContent=act&&ms.countdown!=null?(act.label+" - Collecting — placeholder - "+Math.ceil(ms.countdown)+" s"):"";
+   $("mcount").textContent=act&&ms.countdown!=null?(act.label+" - Collecting sensor data - "+Math.ceil(ms.countdown)+" s"):"";
+   const lrows=ms.structures.concat(ms.events||[]).map(x=>{const L=x.life,live=x.status==="collecting";
+     if(!L)return "<tr><td style='padding:3px 6px'><b>"+x.label+"</b></td><td style='padding:3px 6px;color:var(--mu)'>"+(live?"measuring...":"not measured yet")+"</td><td></td></tr>";
+     const p=Math.round(100*L.p),col=L.p>0.6?"#f85149":(L.p>0.2?"#d29922":"#8b949e");
+     return "<tr title='"+(L.reasons||[]).join("; ").replace(/'/g,"")+"'><td style='padding:3px 6px'><b>"+x.label+"</b></td><td style='padding:3px 6px;font-size:18px;font-weight:700;color:"+col+"'>P(life) "+p+"%</td><td style='padding:3px 6px;color:var(--mu)'>"+L.verdict+(L.final?"":" (live)")+"<br><span style='font-size:11px'>"+(L.reasons||[]).join("; ")+"</span></td></tr>"});
+   $("ltab").innerHTML=lrows.join("")||"<tr><td style='color:var(--mu)'>no structures yet</td></tr>";
+   $("lstat").textContent=act?(act.label+": sensor readings are being tagged "+act.label):"";
    $("mlist").innerHTML=ms.structures.map(x=>"<div>"+x.label+": "+x.status_text+(x.reason?" ("+x.reason+")":"")+"</div>").join("");
    if(document.activeElement!==$("mdw")&&run)$("mdw").value=ms.dwell_s;
    const sc=ms.scene||{};
@@ -159,6 +170,9 @@ $("arm").onchange=async e=>{const r=await post("/api/arm",{armed:e.target.checke
 $("start").onclick=async()=>{const r=await post("/api/start");if(r.error||r.ok===false)say(r.error||r.msg)};
 $("mstart").onclick=async()=>{const r=await post("/api/mission/start",{dwell_s:+$("mdw").value,gap_mm:+$("mgap").value});if(r.error||r.ok===false)say(r.error||r.msg)};
 const STOP=()=>post("/api/stop");$("stop").onclick=STOP;
+$("restart").onclick=async()=>{if(!window.confirm("Restart the navigator? The rover stops and is disarmed; structures and P(life) results are cleared (calibration is kept)."))return;
+ const r=await post("/api/restart");if(r.error){say(r.error);return}say("restarting... the page reloads in a few seconds");
+ const t0=Date.now();const wait=async()=>{try{const q=await fetch("/api/state");if(q.ok&&Date.now()-t0>2500){location.reload();return}}catch(e){}setTimeout(wait,700)};setTimeout(wait,1500)};
 addEventListener("keydown",e=>{if(e.code==="Space"&&e.target.tagName!=="INPUT"){e.preventDefault();STOP()}});
 $("rw").onchange=$("rl").onchange=$("mm").onchange=()=>post("/api/config",{rover_w_mm:+$("rw").value,rover_l_mm:+$("rl").value,margin_mm:+$("mm").value});
 $("recal").onclick=()=>post("/api/recal_ground");$("clrmap").onclick=()=>post("/api/clear_map");

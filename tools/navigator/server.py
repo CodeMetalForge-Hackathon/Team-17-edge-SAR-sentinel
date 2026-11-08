@@ -25,6 +25,7 @@ import control as C  # noqa: E402
 import geom  # noqa: E402
 import mission as M  # noqa: E402
 import perception as P  # noqa: E402
+import sensor_tag  # noqa: E402
 import vision as V  # noqa: E402
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer  # noqa: E402
 
@@ -53,7 +54,9 @@ class App:
             cfg["rover_w_mm"], cfg["rover_l_mm"] = [float(x) for x in a.rover_mm.lower().split("x")]
         self.nav = C.Navigator(self.per, self.src, rover, self.dir, cfg)
         self.motion_enabled = a.enable_motion
-        self.mission = M.Mission(self.nav)
+        self.sensors = (None if getattr(a, "no_sensors", True)              # absent (tests / old callers) = off
+                        else sensor_tag.SensorTagger(a.sensor_dir, log=self.nav._log))
+        self.mission = M.Mission(self.nav, sensors=self.sensors)
         self.dry = a.dry_run or a.sim
         self.view_jpg, self.view_seq = b"", -1
         self.cam_jpg, self.cam_seq = b"", -1
@@ -292,19 +295,24 @@ class App:
         m, c = self.mission, self.per.calib
         if c.H is None:
             return
+        life = self.sensors.results() if self.sensors is not None else {}
         for s in list(m.book.items):
             if s.gone and s.status == "gone":
                 continue
             col = self.COL.get(s.status, (255, 255, 255))
+            lf = life.get(s.label)
             x, y = [int(v) for v in c.to_px([(s.cx, s.cy)])[0]]
             cv2.circle(img, (x, y), 15, col, 2)
             for t, th, cc in ((s.label + " " + {"pending": "", "visiting": "-> going", "collecting": "collecting", "complete": "visited",
-                               "unreachable": "unreachable", "cancelled": "", "failed": "failed"}.get(s.status, ""), 1, col),):
+                               "unreachable": "unreachable", "cancelled": "", "failed": "failed"}.get(s.status, "")
+                               + ("" if not lf else "  life %.0f%%" % (100 * lf["p"])), 1, col),):
                 cv2.putText(img, t.strip(), (x - 18, y - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 3)
                 cv2.putText(img, t.strip(), (x - 18, y - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, cc, 1)
         act = next((s for s in m.book.items if s.id == m.active and s.status == "collecting"), None)
         if act is not None and m.countdown is not None:
-            t = "%s - Collecting - placeholder - %d s" % (act.label, int(math.ceil(m.countdown)))
+            lf = life.get(act.label)
+            t = "%s - Collecting sensor data - %d s%s" % (act.label, int(math.ceil(m.countdown)),
+                                                           "" if not lf or lf.get("final") else " - life %.0f%%" % (100 * lf["p"]))
             (w, h), _ = cv2.getTextSize(t, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
             cv2.rectangle(img, (6, 6), (w + 18, h + 22), (0, 0, 0), -1)
             cv2.putText(img, t, (12, h + 12), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
@@ -336,7 +344,7 @@ class App:
             text("%s %s - %s" % (e.label, e.text.upper(), self.EV_TEXT.get(e.status, e.status)), x - 20, y - 24, col)
         act = next((e for e in m.events.items if e.label == m.active and e.status == "collecting"), None)
         if act is not None and m.countdown is not None:
-            t = "%s %s - Collecting - placeholder - %d s" % (act.label, act.text.upper(), int(math.ceil(m.countdown)))
+            t = "%s %s - Collecting sensor data - %d s" % (act.label, act.text.upper(), int(math.ceil(m.countdown)))
             (w, h), _ = cv2.getTextSize(t, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
             cv2.rectangle(img, (6, 6), (w + 18, h + 22), (0, 0, 0), -1)
             cv2.putText(img, t, (12, h + 12), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 215, 255), 2)
@@ -408,6 +416,15 @@ class App:
             n.state, n.reason = "idle", ""
         return 200, {"ok": True, "x": x, "y": y, "reason": "", "suggestion": None}
 
+    def _reexec(self):
+        time.sleep(0.8)                                  # let the HTTP reply go out
+        try:
+            self.nav.stop()
+        except Exception:
+            pass
+        sys.stdout.flush()
+        os.execv(sys.executable, [sys.executable, os.path.abspath(__file__)] + sys.argv[1:])
+
     def post(self, path, d):
         n, per = self.nav, self.per
         if path == "/api/target":
@@ -434,6 +451,17 @@ class App:
         if path == "/api/mission/start":
             ok, msg = self.mission.start(d.get("dwell_s"), d.get("gap_mm"))
             return (200 if ok else 409), {"ok": ok, "msg": msg}
+        if path == "/api/restart":
+            # operator RESTART: stop the rover, disarm, archive the sensor results, then re-run this server with the same
+            # arguments and environment (fresh mission, structure labels and P(life) panel; calibration in --state-dir stays)
+            self.mission.cancel("restart by operator")
+            ok = n.stop()
+            n.armed = False
+            n._log("RESTART requested by operator")
+            if self.sensors is not None:
+                self.sensors.archive()
+            threading.Thread(target=self._reexec, daemon=True).start()
+            return 200, {"ok": True, "stop_sent": ok}
         if path == "/api/stop" or path == "/api/mission/stop":
             self.mission.cancel("stopped by operator")
             ok = n.stop()
@@ -548,6 +576,8 @@ if __name__ == "__main__":
     ap.add_argument("--margin-mm", type=float, default=None, help="extra clearance in mm")
     ap.add_argument("--arrive-tol-mm", type=float, default=50.0, help="arrival tolerance (centre to target), mm")
     ap.add_argument("--no-cruise", action="store_true", help="disable streamed cruise (bounded bursts only)")
+    ap.add_argument("--sensor-dir", default="~/uno-q-readings", help="UNO Q readings folder (stop.txt, tags.json, results.json)")
+    ap.add_argument("--no-sensors", action="store_true", help="do not tag UNO Q readings during dwells")
     a = ap.parse_args()
     app = App(a)
     print("navigator: http://127.0.0.1:%d  sim=%s dry_run=%s motion=%s" % (a.port, a.sim, app.dry, "ENABLED-for-arming" if a.enable_motion else "OFF"), flush=True)
