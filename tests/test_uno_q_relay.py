@@ -3,11 +3,13 @@ import contextlib
 import io
 import json
 import pathlib
+import shlex
 import subprocess
 import sys
 import tempfile
 import unittest
 from unittest import mock
+from types import SimpleNamespace
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "mac"))
@@ -34,6 +36,18 @@ class Monitor(io.BytesIO):
 
 
 class RelayTests(unittest.TestCase):
+    def test_unattended_identity_requires_specific_key_and_known_host(self):
+        args = SimpleNamespace(node="n1", output=None, echo=False,
+                               pi="khoj@192.168.50.1", identity="~/sensor key")
+        command = relay.ssh_command(args)
+        self.assertEqual(command[command.index("-i") + 1],
+                         str(pathlib.Path.home() / "sensor key"))
+        for option in ("IdentitiesOnly=yes", "BatchMode=yes", "StrictHostKeyChecking=yes"):
+            self.assertIn(option, command)
+        self.assertEqual(command[-2], args.pi)
+        # Even an accidentally unrestricted key gets the logger, never a login shell.
+        self.assertEqual(shlex.split(command[-1])[:3], ["python3", "-u", "-c"])
+
     def test_partial_start_malformed_wrong_node_and_nonfinite_are_skipped(self):
         payload = (b'"ms":12}\nnot json\n' + line(record(1, "n2"))
                    + b'{"node":"n1","ms":true}\n'

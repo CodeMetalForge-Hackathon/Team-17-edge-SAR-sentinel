@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read an existing local USB monitor forward and stream validated JSON to Pi SSH."""
+"""Stream local UNO Q monitor JSON to Pi SSH (Mac USB forward or UNO Q Linux)."""
 import argparse
 import pathlib
 import shlex
@@ -28,9 +28,13 @@ def ssh_command(args):
         command += ["--output", args.output]
     if args.echo:
         command.append("--echo")
-    return ["ssh", "-T", "-o", "ConnectTimeout=5",
-            "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=2",
-            "--", args.pi, shlex.join(command)]
+    ssh = ["ssh", "-T", "-o", "ConnectTimeout=5",
+           "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=2"]
+    if args.identity:
+        ssh += ["-i", str(pathlib.Path(args.identity).expanduser()),
+                "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes",
+                "-o", "StrictHostKeyChecking=yes"]
+    return ssh + ["--", args.pi, shlex.join(command)]
 
 
 def relay(stream, destination, node, count=None):
@@ -68,11 +72,14 @@ def main():
     parser.add_argument("--output", help="output path on Pi, default: ~/uno-q-readings/<node>.jsonl")
     parser.add_argument("--count", type=positive_int, help="stop after this many valid records")
     parser.add_argument("--echo", action="store_true", help="show readings after Pi writes them")
+    parser.add_argument("--identity", help="SSH key for unattended login; requires a known host key")
     args = parser.parse_args()
     if args.pi.startswith("-") or any(c.isspace() for c in args.pi):
         parser.error("--pi must be a single SSH destination")
     if args.monitor_port > 65535:
         parser.error("--monitor-port must be between 1 and 65535")
+    if args.identity and not pathlib.Path(args.identity).expanduser().is_file():
+        parser.error("--identity must name an existing SSH private key")
 
     child = None
     result = 0
@@ -91,7 +98,7 @@ def main():
                 print("Monitor closed before the requested record count.", file=sys.stderr)
                 result = 1
             else:
-                print("Mac forwarded %d reading(s)." % sent, file=sys.stderr)
+                print("Forwarded %d reading(s)." % sent, file=sys.stderr)
     except KeyboardInterrupt:
         result = 130
     except (OSError, ValueError, subprocess.SubprocessError) as exc:

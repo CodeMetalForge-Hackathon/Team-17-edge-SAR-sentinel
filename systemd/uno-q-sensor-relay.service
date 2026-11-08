@@ -1,0 +1,20 @@
+[Unit]
+Description=UNO Q sensor monitor to Raspberry Pi log
+Wants=network-online.target
+After=network-online.target arduino-router.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=arduino
+WorkingDirectory=/home/arduino/uno-q-relay
+ExecStart=/usr/bin/python3 -u /home/arduino/uno-q-relay/mac/uno_q_relay.py --pi khoj@192.168.50.1 --node n1 --monitor-port 7500 --identity /home/arduino/.ssh/uno_q_sensor_ed25519
+Restart=always
+RestartSec=5
+KillMode=control-group
+TimeoutStopSec=10
+UMask=0077
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target
