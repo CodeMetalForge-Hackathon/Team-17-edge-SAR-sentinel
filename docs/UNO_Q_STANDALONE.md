@@ -23,8 +23,11 @@ records at MCU timestamps 1450338 through 1451287 ms confirmed wireless logging
 from the running service. After giving the existing hotspot profile priority
 100 and unlimited activation retries, the operator confirmed a clean reboot
 automatically resumed readings without manually joining Wi-Fi. That successful
-reboot used Mac USB power. The eight isolated relay tests pass; power-bank-only
-startup remains a separate, pending hardware check.
+reboot used Mac USB power. On 2026-11-08, the operator then confirmed the final
+power-bank-only test: after halting the UNO Q, fully disconnecting USB and
+connecting a 5 V / 3 A-rated bank with a USB-C-to-USB-C cable, fresh readings resumed
+on the Pi without a manual Wi-Fi join or Mac USB connection. The eight isolated
+relay tests also pass.
 
 ## Prerequisites already established in this setup
 

@@ -52,7 +52,7 @@ The UNO Q setup uses its running router's local monitor, USB to the Mac, and the
 
 See [the UNO Q setup and verification guide](docs/UNO_Q_SENSOR_RELAY.md). It includes the uploaded Grove/DHT11 sketch, the matching App Lab ADB forwarding command, and `mac/uno_q_relay.py` / `pi/uno_q_log.py` for repeatable foreground logging. On this build, the sketch's `flame` field is a temperature-rise flag, not a physical flame sensor.
 
-For power-bank operation, see [the standalone Wi-Fi setup](docs/UNO_Q_STANDALONE.md). Direct UNO Q-to-Pi sensor transfer and restricted key login were verified over the Pi's existing hotspot. The boot service and preferred hotspot settings automatically resumed logging after a clean reboot under Mac USB power; power-bank-only startup remains the final hardware check. The relay supports a dedicated `--identity` and direct monitor port `7500` on UNO Q Linux.
+For power-bank operation, see [the standalone Wi-Fi setup](docs/UNO_Q_STANDALONE.md). Direct UNO Q-to-Pi sensor transfer and restricted key login were verified over the Pi's existing hotspot. On 2026-11-08, the operator confirmed automatic logging resumed after boot with the UNO Q powered only by a 5 V / 3 A-rated USB-C power bank, disconnected from the Mac. The relay supports a dedicated `--identity` and direct monitor port `7500` on UNO Q Linux.
 
 ## Owners
 
