@@ -71,7 +71,7 @@ class Navigator:
                     "arrive_tol_mm": 50.0, "cruise": True,
                     # periodic obstacle detection DURING a run: a fresh full frame is folded into the map about every
                     # map_period_s; a map older than map_max_age_s stops the run; no route is held (stopped) up to hold_s
-                    "map_period_s": 10.0, "map_max_age_s": 25.0, "no_route_hold_s": 30.0}
+                    "map_period_s": 6.0, "map_max_age_s": 10.0, "no_route_hold_s": 30.0}
         self.cfg.update(cfg or {})
         self.model = MotionModel()
         self.now = now
@@ -96,6 +96,10 @@ class Navigator:
         self.timing = {"frames": 0, "fetch_ms": 0.0, "cruise_s": 0.0, "bursts": 0, "turns": 0, "plans": 0, "plans_reused": 0,
                        "recoveries": 0, "snapshot_ms": 0.0, "map_refreshes": 0, "obstruction_stops": 0, "unsafe_stops": 0,
                        "unsafe_recovered": 0}
+        self._unsafe_dist, self._unsafe_budget = None, 0
+        self._aligned_legs = set()
+        self._noroute_sig, self._noroute_res = None, None     # no identical replans while nothing changed
+        self._room_moves = 0
         self._unsafe_sigs = []        # signatures of rejected actions this run (the same one twice = stop and report)
         self.map_log = []             # (wall time, frame seq, route_blocked) of every in-run map refresh
         self._map_seen = None
@@ -103,6 +107,8 @@ class Navigator:
         self._had_route = False
         self._cached = None           # {"target", "wps"}: the route planned from the target snapshot, reused while on it
         self.cruise_ttl = CRUISE_TTL
+        self.soft_failed = False
+        self.keep_armed = False       # mission mode: a finished leg does not disarm (STOP / a failure still do)
         self.target = None            # normalized (x, y), exactly as selected (never snapped)
         self.state = "idle"           # idle | running | done | failed
         self.reason = ""
@@ -161,12 +167,17 @@ class Navigator:
     def make_plan(self, pos, target=None, heading=None):
         c = self.cfg
         L, W, m = self.footprint()
+        # can the rover rotate in place where it stands? (the SAME test the execution guard applies to a turn, plus 8 mm)
+        hm0 = self.p.calib.height_mm or 1.0
+        obs0 = self.p.obstacle_rects(near=pos)
+        stb = geom.cell_of(pos[0], pos[1], c["cols"], c["rows"]) in geom.planning_blocked(
+            obs0, c["cols"], c["rows"], math.hypot(L, W) / 2 + 8.0 / hm0, self.p.calib.aspect)
         # allow for +-8 degrees of heading error while driving a leg (the same allowance the hard check uses)
         L, W = L + 0.14 * W, W + 0.14 * L
         if heading is None and self.pose and self.pose.get("theta") is not None:
             heading = self.pose["theta"]
         return geom.plan_oriented(pos, target or self.target, self.p.obstacle_rects(near=pos), c["cols"], c["rows"], L, W,
-                                  m, self.p.calib.aspect, heading=heading)
+                                  m, self.p.calib.aspect, heading=heading, start_arc_max=ARC_MAX, start_turn_blocked=stb)
 
     def footprint_outside(self, pose, tol=0.01):
         """None if the WHOLE rover (rotated footprint) is inside the usable boundary, else a description."""
@@ -270,6 +281,92 @@ class Navigator:
             self._halt()
             return "obstacle map is %.0f s old (refresh failed: %s): stopped" % (age, per.map_err or "no fresh full frame")
         return res
+
+    def _diagnose_route(self, pos, target):
+        """Why is there no route? Concrete geometry for the report (boxed-in start, blocked target, nearest obstacle)."""
+        try:
+            c, A, hm = self.cfg, self.p.calib.aspect, self.p.calib.height_mm or 0
+            L, W, m = self.footprint()
+            L, W = L + 0.14 * W, W + 0.14 * L
+            obs = self.p.obstacle_rects(near=pos)
+            bx, by, bt = geom.clearance_sets(obs, c["cols"], c["rows"], L, W, m, A)
+            sc = geom.cell_of(pos[0], pos[1], c["cols"], c["rows"])
+            tc = geom.cell_of(target[0], target[1], c["cols"], c["rows"])
+            free = 0
+            for nd, (dc, dr) in enumerate(geom.DIRS):
+                n = (sc[0] + dc, sc[1] + dr)
+                if 0 <= n[0] < c["cols"] and 0 <= n[1] < c["rows"] and n not in (bx if nd < 2 else by):
+                    free += 1
+            txt = "rover cell %d/4 neighbours free%s; target cell %s; " % (
+                free, " (start cell is inside the turn-clearance halo)" if sc in bt else "",
+                "BLOCKED for the footprint" if (tc in bx and tc in by) else "free")
+            return txt + self._clearance_detail({"x": pos[0], "y": pos[1]}, obs)
+        except Exception as e:
+            return "diagnosis failed: %s" % e
+
+    def _dump_evidence(self, why):
+        """Keep the failure evidence on disk (pose, target, route, obstacle cells near both): survives restarts."""
+        try:
+            import glob
+            pose, tgt = self.pose, self.target
+            near = []
+            if pose and tgt:
+                for r in self.p.obstacle_rects(near=(pose["x"], pose["y"])):
+                    cx, cy = (r[0] + r[2]) / 2, (r[1] + r[3]) / 2
+                    if min(math.hypot((cx - q[0]) * self.p.calib.aspect, cy - q[1]) for q in ((pose["x"], pose["y"]), tgt)) < 0.3:
+                        near.append([round(v, 4) for v in r])
+            d = {"t": time.strftime("%Y-%m-%d %H:%M:%S"), "why": why, "pose": pose, "target": tgt, "path": [list(p) for p in self.path],
+                 "step": self.step, "log": self.log[-30:], "map_seq": self.p.map_seq, "map_age_s": round(time.time() - self.p.map_time, 1) if self.p.map_time else None,
+                 "obstacle_rects_near": near[:400], "map": self.p.depth_map.to_dict(),
+                 "calib": {"aspect": self.p.calib.aspect, "height_mm": self.p.calib.height_mm}}
+            fn = os.path.join(self.dir, "fail_%s.json" % time.strftime("%Y%m%d_%H%M%S"))
+            json.dump(d, open(fn, "w"), default=lambda o: o.tolist() if hasattr(o, "tolist") else str(o))
+            for old in sorted(glob.glob(os.path.join(self.dir, "fail_*.json")))[:-10]:
+                os.remove(old)
+        except Exception as e:
+            self._log("evidence dump failed: %s" % e)
+
+    def _make_room(self, pose, why_tag):
+        """The rover is stuck INSIDE the clearance halo of something (no route from here, a turn rejected here). Find the
+        shortest short move along its own heading (reverse preferred when equal) that is guarded-safe and ends where a route
+        / a turn exists, and do it. Bounded per run. Returns the new Obs or None."""
+        if self._room_moves >= 3 or self.cancelled():
+            return None
+        A, hm = self.p.calib.aspect, self.p.calib.height_mm or 1.0
+        pos, th = (pose["x"], pose["y"]), pose["theta"]
+        cfg = self.cfg
+        L, W, m = self.footprint()
+        R = math.hypot(L, W) / 2
+        obs = self.p.obstacle_rects(near=pos)
+        bt = geom.planning_blocked(obs, cfg["cols"], cfg["rows"], R + m, A)
+        best = None
+        for dur in (0.2, 0.35, 0.5):
+            for cmd, sgn in (("B", -1.0), ("F", 1.0)):
+                act = {"kind": "burst", "cmd": cmd, "dur": dur, "speed": BURST_CMD, "trim": 0.0,
+                       "text": "MAKE ROOM %s %.2fs (%s)" % (cmd, dur, why_tag)}
+                if self._unsafe(pose, act):
+                    continue
+                d = self._fwd_speed(BURST_CMD) * dur
+                end = ((pos[0] * A + sgn * math.cos(th) * d) / A, pos[1] + sgn * math.sin(th) * d)
+                if not (0 < end[0] < 1 and 0 < end[1] < 1):
+                    continue
+                if geom.cell_of(end[0], end[1], cfg["cols"], cfg["rows"]) in bt:
+                    continue                                   # must end where the rover can also turn
+                if self.target is not None and self.make_plan(end, heading=th)["error"]:
+                    continue
+                if best is None:
+                    best = act
+            if best:
+                break
+        if best is None:
+            return None
+        self._room_moves += 1
+        self.step += 1
+        self._log("step %d: %s" % (self.step, best["text"]))
+        self._move(best["cmd"], best["dur"], best["speed"], 0.0)
+        if self.cancelled():
+            return None
+        return self.observe(self._seq_after_stop() + 2, quick=True)
 
     def preview(self):
         if self.target is None or not self.pose:
@@ -390,7 +487,14 @@ class Navigator:
         h = getattr(self.rover, "halt", None)
         (h or self.rover.stop)()
 
+    def cancelled(self):
+        """STOP or disarm: nothing may move the rover (or resume a run/mission) after this."""
+        return self.stop_flag.is_set() or not self.armed
+
     def _move(self, cmd, dur, speed=None, trim=0.0):
+        if self.cancelled():
+            self._halt()
+            return None
         self.p.reset_heading()
         self._halt()
         if cmd in ("Q", "E") and self._turn_target and getattr(self.rover, "turn_by", None) is not None:
@@ -586,6 +690,7 @@ class Navigator:
             self.target = tuple(target)
             self.stop_flag.clear()
             self.state, self.reason, self.step = "running", "", 0
+            self.soft_failed = False
             self.run_info = {"t_start": time.time(), "target": self.target}
             self.thread = threading.Thread(target=self._run, daemon=True)
             self.thread.start()
@@ -621,11 +726,36 @@ class Navigator:
         if self.thread:
             self.thread.join(t)
 
-    def _fail(self, why):
+    SOFT = ("replan:", "no progress", "cannot align", "could not settle")
+    SOFT_BLOCKED = ("no safe alternative", "recovery exhausted", "fresh map:")
+
+    def _soft_reason(self, why):
+        """A ROUTE-class failure (no route / no safe alternative / not converging). Terminal safety failures (tracking, comms,
+        boundary, stale map, internal errors, STOP) are never soft."""
+        if why.startswith(self.SOFT):
+            return True
+        return why.startswith("blocked:") and any(k in why for k in self.SOFT_BLOCKED)
+
+    def _fail(self, why, soft=None):
+        """Stop the rover and report. Normally also disarms. During a MISSION a soft (route-class) failure leaves the rover
+        stopped but keeps the operator's single authorisation, so the mission can pick another inspection position; it never
+        re-arms anything, and STOP/disarm/terminal failures still cancel everything."""
+        if soft is None:
+            soft = self._soft_reason(why)
         try:
             self._halt()
         finally:
             self.rover.stop()
+        if soft and self.keep_armed and not self.stop_flag.is_set():
+            self.state, self.reason, self.soft_failed = "failed", why, True
+            self._log("FAILED (route-class; still armed for the mission): " + why)
+            self._dump_evidence(why)
+            self.save_model()
+            self.p.save()
+            return
+        self.soft_failed = False
+        if why.startswith(("replan:", "blocked:")):
+            self._dump_evidence(why)
         self.armed = False
         self.state, self.reason = "failed", why
         self._log("FAILED: " + why)
@@ -635,7 +765,8 @@ class Navigator:
     def _finish(self, reason):
         self._halt()
         self.rover.stop()
-        self.armed = False
+        if not self.keep_armed:
+            self.armed = False
         self.state, self.reason = "done", reason
         self.run_info["t_end"] = time.time()
         self._log(reason)
@@ -705,6 +836,9 @@ class Navigator:
         self._leg_dir = {}
         self._cached = None
         self._unsafe_sigs = []
+        self._noroute_sig, self._noroute_res, self._room_moves = None, None, 0
+        self._unsafe_dist, self._unsafe_budget = None, 0
+        self._aligned_legs = set()
         self.timing["unsafe_stops"] = self.timing["unsafe_recovered"] = 0
         self._log("run started; capturing the target snapshot (one full RGB+depth frame)")
         self.p.map_frozen = False
@@ -765,8 +899,21 @@ class Navigator:
                     continue
                 if why:
                     return self._fail(why)
-                res = self._route(pos)
+                sig = (self.p.map_seq, round(pos[0], 3), round(pos[1], 3), round(pose["theta"], 1))
+                if self._hold_t0 is not None and sig == self._noroute_sig:
+                    res = self._noroute_res                          # nothing changed: do not replan the same thing again
+                else:
+                    res = self._route(pos)
+                    if res["error"]:
+                        self._noroute_sig, self._noroute_res = sig, res
                 if res["error"]:
+                    if self._hold_t0 is None:
+                        self._log("NO ROUTE from here: %s" % self._diagnose_route(pos, self.target))
+                        nobs = self._make_room(pose, "no route")      # stuck inside a clearance halo? try one guarded relocation
+                        if nobs is not None and nobs.pose is not None:
+                            obs = nobs
+                            self._cached, self._leg_dir = None, {}
+                            continue
                     if self._had_route and self.p.map_frozen:       # new obstruction left no route: stay stopped, report, wait
                         if self._hold_t0 is None:
                             self._hold_t0 = self.now()
@@ -774,11 +921,12 @@ class Navigator:
                             self.reason = "no route: holding stopped"
                         self._halt()
                         if self.now() - self._hold_t0 > c["no_route_hold_s"]:
-                            return self._fail("replan: %s (held stopped %.0f s)" % (res["error"], c["no_route_hold_s"]))
+                            return self._fail("replan: %s (held stopped %.0f s) [%s]" % (
+                                res["error"], c["no_route_hold_s"], self._diagnose_route(pos, self.target)))
                         time.sleep(0.3)
                         obs = self.observe(self._seq_after_stop() + 1, quick=True)
                         continue
-                    return self._fail("replan: " + res["error"])
+                    return self._fail("replan: %s [%s]" % (res["error"], self._diagnose_route(pos, self.target)))
                 if self._hold_t0 is not None:
                     self._log("route found again: resuming")
                     self._hold_t0, self.reason = None, ""
@@ -868,6 +1016,9 @@ class Navigator:
 
     # ------------------------------------------------------------------ cruise
     def _cruise(self, act):
+        if self.cancelled():
+            self._halt()
+            return
         a = self.rover
         l, r = act["l"], act["r"]
         a.drive(l, r, ttl=self.cruise_ttl)
@@ -951,6 +1102,12 @@ class Navigator:
         want = math.atan2(dv, du)
         n = math.hypot(du, dv)
         th = pose["theta"]
+        akey = (round(res["waypoints"][seg + 1][0], 2), round(res["waypoints"][seg + 1][1], 2))
+        if akey in self._aligned_legs:
+            # recovery had to line the rover up with this leg (a diagonal approach swept a bigger box than the aligned
+            # footprint the planner assumed): keep driving ALONG the leg, do not turn back toward the diagonal aim point
+            a, b = res["waypoints"][seg], res["waypoints"][seg + 1]
+            want = math.atan2(b[1] - a[1], (b[0] - a[0]) * A)
         # forward or reverse per leg: whichever needs less turning; a whole straight reverse leg is fine, a 180 degree turn
         # is not. The choice is kept for the leg (no direction chattering).
         errF = geom.wrap(want - th)
@@ -1056,7 +1213,7 @@ class Navigator:
         return ""
 
     # ------------------------------------------------------------------ unsafe-action recovery
-    def _escape_actions(self, pose, res):
+    def _escape_actions(self, pose, res, rejected=None):
         """Short candidate moves for a stationary rover whose planned action was rejected: back away (reverse or forward,
         whichever leaves more room) and a turn toward the route. Every candidate must still pass _unsafe() (the same
         guarded path as any other action); translations must also END with more footprint-to-obstacle gap than now."""
@@ -1076,6 +1233,44 @@ class Navigator:
                                        cmd, ESCAPE_DUR, speed, gain * (self.p.calib.height_mm or 0))}))
         out.sort(key=lambda t: -t[0])
         acts = [a for _, a in out]
+        shorter = []
+        if rejected is not None and rejected.get("cmd") in ("F", "B"):
+            # the SAME move, shorter: a planned move that misses the guard by a hair is usually fine over a shorter distance
+            # (the guard checks the swept footprint at half and full distance), so progress continues toward the same route
+            d0 = rejected.get("dur") if rejected["kind"] == "burst" else 0.3
+            for k in (0.5, 0.25):
+                dur = round(max(0.1, d0 * k), 2)
+                if dur < d0:
+                    shorter.append({"kind": "burst", "cmd": rejected["cmd"], "dur": dur, "speed": rejected.get("speed") or BURST_CMD,
+                                    "trim": rejected.get("trim", 0.0), "text": "RECOVERY %s %.2fs (shorter than the rejected move)" % (rejected["cmd"], dur)})
+        acts = shorter + acts
+        if rejected is not None and rejected.get("cmd") in ("F", "B") and self.turn_dir is not None:
+            # a MISALIGNED rover has a bigger swept box than the aligned one the planner assumed: if turning to line up with
+            # the leg is itself safe, do that first (the turn is guarded by the circle check like every other turn)
+            _aim, seg, _rem = self._aim(pos, res["waypoints"])
+            a, b = res["waypoints"][seg], res["waypoints"][seg + 1]
+            want = math.atan2(b[1] - a[1], (b[0] - a[0]) * A)      # the LEG's direction (the planner's axis-aligned assumption)
+            err = min(geom.wrap(want - th), geom.wrap(want - th - math.pi), key=abs)
+            if abs(err) > math.radians(6):
+                tt = 0.8 * min(abs(err), math.radians(75))
+                cmd = "Q" if self.turn_dir["Q"] * err > 0 else "E"
+                acts = [{"kind": "burst", "cmd": cmd, "dur": 0.3, "turn_target": tt,
+                         "align_key": (round(b[0], 2), round(b[1], 2)),
+                         "text": "RECOVERY %s turn %.0f deg (line up with the leg first)" % (cmd, math.degrees(tt))}] + acts
+        if rejected is not None and rejected.get("cmd") in ("Q", "E"):
+            # a rejected TURN: relocate along the heading to the nearest cell where the turn is clear (and a route exists)
+            L, W, m = self.footprint()
+            bt = geom.planning_blocked(self.p.obstacle_rects(near=pos), self.cfg["cols"], self.cfg["rows"], math.hypot(L, W) / 2 + m, A)
+            room = []
+            for dur in (0.2, 0.35, 0.5):
+                for cmd, sgn in (("B", -1.0), ("F", 1.0)):
+                    d = self._fwd_speed(BURST_CMD) * dur
+                    end = ((pos[0] * A + sgn * math.cos(th) * d) / A, pos[1] + sgn * math.sin(th) * d)
+                    if 0 < end[0] < 1 and 0 < end[1] < 1 and geom.cell_of(end[0], end[1], self.cfg["cols"], self.cfg["rows"]) not in bt:
+                        room.append((dur, {"kind": "burst", "cmd": cmd, "dur": dur, "speed": BURST_CMD, "trim": 0.0,
+                                           "text": "RECOVERY %s %.2fs (to a cell with turning room)" % (cmd, dur)}))
+            room.sort(key=lambda t: t[0])
+            acts = [a for _, a in room] + acts
         if self.turn_dir is not None:
             aim, _seg, _rem = self._aim(pos, res["waypoints"])
             want = math.atan2(aim[1] - pos[1], (aim[0] - pos[0]) * A)
@@ -1095,28 +1290,44 @@ class Navigator:
         same (position, heading, action) twice, or UNSAFE_MAX stops in a run, ends the run stopped with the reason."""
         self._halt()
         self.timing["unsafe_stops"] += 1
+        if self.dist is not None and (self._unsafe_dist is None or self.dist < self._unsafe_dist - 0.04):
+            self._unsafe_dist, self._unsafe_budget, self._unsafe_sigs = self.dist, 0, []   # real progress (>~30 mm): fresh budget
+        self._unsafe_budget += 1
         sig = (round(pose["x"], 2), round(pose["y"], 2), int(round(math.degrees(pose["theta"]) / 15.0)), act["kind"], act.get("cmd"))
         self._unsafe_sigs.append(sig)
         detail = "%s rejected: %s" % (act.get("text", act.get("cmd")), why)
-        self._log("UNSAFE action stopped before moving; recovering (%d of %d): %s" % (self.timing["unsafe_stops"], UNSAFE_MAX, detail))
-        if self.timing["unsafe_stops"] > UNSAFE_MAX or self._unsafe_sigs.count(sig) >= 2:
-            return None, "blocked: " + detail + " [recovery exhausted: the same unsafe action recurred or %d stops this run]" % UNSAFE_MAX
+        self._log("UNSAFE action stopped before moving; recovering (%d of %d): %s" % (self._unsafe_budget, UNSAFE_MAX, detail))
+        if self._unsafe_budget > UNSAFE_MAX or self._unsafe_sigs.count(sig) >= 2:
+            return None, "blocked: " + detail + " [recovery exhausted: the same unsafe action recurred or %d stops without progress]" % UNSAFE_MAX
         if self.stop_flag.is_set() or not self.armed:
             return None, "stopped"
         fresh = getattr(self.src, "fresh_full", None)
         fr = fresh(8.0) if fresh else self.src.wait_fresh(self._seq_after_stop() + 1, 5.0)
+        if self.cancelled():                           # STOP/disarm arrived while waiting for the frame
+            self._halt()
+            return None, "stopped"
         if fr is None:
             return None, "blocked: %s [no fresh full frame to recover with]" % detail
-        if not getattr(fr, "partial", False):
-            try:
-                self.p.refresh_map(fr)                 # current-scene occupancy (an older frame never overwrites a newer map)
-            except Exception as e:
-                self._log("recovery map refresh failed: %s" % e)
+        rx = getattr(fr, "rx", None)
+        if getattr(fr, "partial", False) or (rx is not None and time.time() - rx > 3.0):
+            return None, "blocked: %s [recovery needs a fresh FULL frame, got %s]" % (
+                detail, "a partial frame" if getattr(fr, "partial", False) else "one %.1f s old" % (time.time() - rx))
+        try:
+            self.p.refresh_map(fr)                     # current-scene occupancy (an older frame never overwrites a newer map)
+        except Exception as e:
+            return None, "blocked: %s [map refresh failed, not moving without a valid map: %s]" % (detail, e)
+        if self.p.map_seq < fr.seq or self.now() - self.p.map_time > self.cfg["map_max_age_s"]:
+            return None, "blocked: %s [obstacle map is not current after the refresh (%s)]" % (detail, self.p.map_err or "no newer map")
         obs = self.p.process(fr, update_map=False)
         self._apply_heading(obs)
         p2 = obs.pose
         if p2 is None or p2.get("theta") is None:
             return None, "blocked: %s [rover not tracked in the fresh frame]" % detail
+        if not p2["inside"]:
+            return None, "blocked: %s [rover is outside the sandbox boundary: physical reset needed]" % detail
+        out = self.footprint_outside(p2)
+        if out:
+            return None, "blocked: %s [%s: physical reset needed]" % (detail, out)
         self._cached, self._leg_dir = None, {}
         pos = (p2["x"], p2["y"])
         res = self.make_plan(pos, heading=p2["theta"])
@@ -1128,12 +1339,17 @@ class Navigator:
             self._log("recovered: the fresh map/pose makes the next action safe; continuing to the same target")
             return obs, None
         why2 = a2.get("why") if a2["kind"] == "fail" else self._unsafe(p2, a2)
-        for esc in self._escape_actions(p2, res):
+        for esc in self._escape_actions(p2, res, rejected=act):
             if self._unsafe(p2, esc):
                 continue
             if self.step >= self.cfg["max_steps"]:
                 break
+            if self.cancelled():
+                self._halt()
+                return None, "stopped"
             self.step += 1
+            if esc.get("align_key"):
+                self._aligned_legs.add(esc["align_key"])
             self._log("step %d: %s  (replacing the rejected action)" % (self.step, esc["text"]))
             if esc.get("turn_target"):
                 self._turn_target = esc["turn_target"]
@@ -1141,6 +1357,9 @@ class Navigator:
                 self._move(esc["cmd"], esc.get("dur", 0.2), esc.get("speed"), esc.get("trim", 0.0))
             except Exception as e:
                 return None, "rover comm error: %s" % e
+            if self.cancelled():
+                self._halt()
+                return None, "stopped"
             nobs = self.observe(self._seq_after_stop() + 2, quick=esc["cmd"] in ("F", "B"))
             if nobs is None or nobs.pose is None:
                 return None, "blocked: tracking lost after the recovery move (%s)" % detail

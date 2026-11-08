@@ -23,6 +23,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import control as C  # noqa: E402
 import geom  # noqa: E402
+import mission as M  # noqa: E402
 import perception as P  # noqa: E402
 import vision as V  # noqa: E402
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer  # noqa: E402
@@ -52,6 +53,7 @@ class App:
             cfg["rover_w_mm"], cfg["rover_l_mm"] = [float(x) for x in a.rover_mm.lower().split("x")]
         self.nav = C.Navigator(self.per, self.src, rover, self.dir, cfg)
         self.motion_enabled = a.enable_motion
+        self.mission = M.Mission(self.nav)
         self.dry = a.dry_run or a.sim
         self.view_jpg, self.view_seq = b"", -1
         self.cam_jpg, self.cam_seq = b"", -1
@@ -168,6 +170,7 @@ class App:
             "pose": pose, "pose_source": (pose or {}).get("source"),
             "target": t, "target_info": tinfo,
             "path": path, "sweep": self.sweep(path),
+            "mission": self._mission_state(),
             "plan_error": (res or {}).get("error", ""),
             "plan_warning": ("" if n.state == "running" or not res or res.get("error") else
                              (lambda g: ("route drawn, but the guard would stop its first move: " + g + " (the run would stop, refresh the map "
@@ -188,6 +191,13 @@ class App:
             "recording": None if not self.rec else {"n": self.rec["n"], "dir": self.rec["dir"]},
             "perf": self.perf(),
         }
+
+    def _mission_state(self):
+        try:
+            self.mission.refresh_preview()          # idle: keep the structure list (stable labels) current
+        except Exception as e:
+            self.nav._log("structure preview error: %s" % e)
+        return self.mission.snapshot()
 
     def perf(self):
         st = getattr(self.src, "stats", None)
@@ -244,7 +254,7 @@ class App:
         if fr is None:
             return None
         n, c = self.nav, self.per.calib
-        key = (fr.seq, n.target, len(n.path), n.state)
+        key = (fr.seq, n.target, len(n.path), n.state, self.mission.overlay_key())
         if key != self.live_key:
             img = fr.bgr.copy()
             if c.corners is not None:
@@ -259,9 +269,34 @@ class App:
                     cv2.circle(img, (int(tp[0]), int(tp[1])), 7, (0, 255, 0), 2)
                     cv2.line(img, (int(tp[0]) - 11, int(tp[1])), (int(tp[0]) + 11, int(tp[1])), (0, 255, 0), 1)
                     cv2.line(img, (int(tp[0]), int(tp[1]) - 11), (int(tp[0]), int(tp[1]) + 11), (0, 255, 0), 1)
+            self._draw_structures(img)
             self.live_jpg = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 80])[1].tobytes()
             self.live_key = key
         return self.live_jpg
+
+    COL = {"pending": (255, 255, 255), "visiting": (255, 200, 0), "collecting": (0, 200, 255), "complete": (0, 200, 0),
+           "unreachable": (0, 0, 255), "cancelled": (150, 150, 150), "failed": (0, 0, 255)}
+
+    def _draw_structures(self, img):
+        """Structure labels + status on the live feed; the active visit gets the placeholder banner with the countdown.
+        Text only: no readings and no detection result exist in this phase."""
+        m, c = self.mission, self.per.calib
+        if c.H is None:
+            return
+        for s in list(m.book.items):
+            col = self.COL.get(s.status, (255, 255, 255))
+            x, y = [int(v) for v in c.to_px([(s.cx, s.cy)])[0]]
+            cv2.circle(img, (x, y), 15, col, 2)
+            for t, th, cc in ((s.label + " " + {"pending": "", "visiting": "-> going", "collecting": "collecting", "complete": "visited",
+                               "unreachable": "unreachable", "cancelled": "", "failed": "failed"}.get(s.status, ""), 1, col),):
+                cv2.putText(img, t.strip(), (x - 18, y - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 3)
+                cv2.putText(img, t.strip(), (x - 18, y - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, cc, 1)
+        act = next((s for s in m.book.items if s.id == m.active and s.status == "collecting"), None)
+        if act is not None and m.countdown is not None:
+            t = "%s - Collecting - placeholder - %d s" % (act.label, int(math.ceil(m.countdown)))
+            (w, h), _ = cv2.getTextSize(t, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
+            cv2.rectangle(img, (6, 6), (w + 18, h + 22), (0, 0, 0), -1)
+            cv2.putText(img, t, (12, h + 12), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
 
     def camera(self):
         """Raw RGB beside a COLOURISED depth image (display only; numeric depth is never taken from this)."""
@@ -287,6 +322,8 @@ class App:
         """Exact point from the map ({x,y} normalized) or the live image ({px,py} image pixels). Validated for the whole
         rover; never silently moved. While running this is a re-target: stop, replan from the observed pose, go."""
         n, c = self.nav, self.per.calib
+        if self.mission.running():
+            return 409, {"ok": False, "reason": "a mission is running: STOP it first"}
         if "px" in d:
             if c.H is None:
                 return 409, {"ok": False, "reason": "calibration incomplete"}
@@ -325,16 +362,24 @@ class App:
             if d.get("armed") and (not per.last_obs or not per.last_obs.pose):
                 return 409, {"error": "cannot arm: rover not currently tracked"}
             n.armed = bool(d.get("armed"))
+            if not n.armed:
+                self.mission.cancel("disarmed by operator")
             n._log("armed" if n.armed else "disarmed")
             return 200, {"armed": n.armed}
         if path == "/api/start":
+            if self.mission.running():
+                return 409, {"error": "a mission is running"}
             if n.target is None:
                 return 409, {"error": "select a target first"}
             if per.calib.plane is None or per.calib.H is None:
                 return 409, {"error": "calibration incomplete (boundary markers / ground plane)"}
             ok, msg = n.start(n.target)
             return (200 if ok else 409), {"ok": ok, "msg": msg}
-        if path == "/api/stop":
+        if path == "/api/mission/start":
+            ok, msg = self.mission.start(d.get("dwell_s"), d.get("gap_mm"))
+            return (200 if ok else 409), {"ok": ok, "msg": msg}
+        if path == "/api/stop" or path == "/api/mission/stop":
+            self.mission.cancel("stopped by operator")
             ok = n.stop()
             return (200 if ok else 502), {"stop_sent": ok}
         if path == "/api/manual":

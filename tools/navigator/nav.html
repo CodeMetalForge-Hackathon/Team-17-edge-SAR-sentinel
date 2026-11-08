@@ -48,6 +48,14 @@ select{background:#0d1117;color:var(--tx);border:1px solid #30363d;border-radius
   <div class="row"><button id="start">START</button></div>
   <button id="stop">STOP (space)</button>
  </div>
+ <div class="pn"><h3>Structure visits</h3>
+  <div class="row"><label>collect seconds <input type="number" id="mdw" value="15" min="1" max="120" style="width:60px"></label>
+   <label>inspection gap mm <input type="number" id="mgap" value="110" min="60" max="250" style="width:60px"></label></div>
+  <div class="row"><button id="mstart">START MISSION (arm first)</button></div>
+  <div id="mstat" style="color:var(--mu);min-height:18px"></div>
+  <div id="mcount" style="font-weight:600"></div>
+  <div id="mlist" style="font-size:13px"></div>
+ </div>
  <div class="pn"><h3>Tracking and timing</h3>
   <div class="row" id="chips"></div>
   <div class="row" id="timing"></div>
@@ -79,6 +87,7 @@ function draw(){
   (dc.cells||[]).forEach(([c,r,v])=>{if(v>=0.5)ctx.fillRect(X(c/dc.cols),Y((r+1)/dc.rows),cv.width/dc.cols+1,cv.height/dc.rows+1)});
   ctx.fillStyle="rgba(210,153,34,.40)";   // no usable depth (holes / never seen): NOT free, the planner treats it as blocked
   (dc.unknown||[]).forEach(([c,r])=>ctx.fillRect(X(c/dc.cols),Y((r+1)/dc.rows),cv.width/dc.cols+1,cv.height/dc.rows+1));
+  if(S.mission){ctx.font="bold 13px sans-serif";S.mission.structures.forEach(x=>{ctx.fillStyle=x.status==="complete"?"#2ea043":(x.status==="unreachable"||x.status==="failed"?"#f85149":"#fff");ctx.fillText(x.label,X(x.x)-8,Y(x.y)-6)})}
   ctx.fillStyle="rgba(210,153,34,.5)";ctx.strokeStyle="#d29922";ctx.lineWidth=2;
   S.manual.forEach(r=>{ctx.fillRect(X(r[0]),Y(r[3]),X(r[2])-X(r[0]),Y(r[1])-Y(r[3]));ctx.strokeRect(X(r[0]),Y(r[3]),X(r[2])-X(r[0]),Y(r[1])-Y(r[3]))});
   if(drag&&drag.b){ctx.strokeStyle="#fff";ctx.setLineDash([5,4]);const a=drag.a,b=drag.b;ctx.strokeRect(X(Math.min(a[0],b[0])),Y(Math.max(a[1],b[1])),Math.abs(X(a[0])-X(b[0])),Math.abs(Y(a[1])-Y(b[1])));ctx.setLineDash([])}
@@ -111,6 +120,13 @@ function ui(){
   $("timing").innerHTML=chip("run time "+(n.run_s==null?"-":n.run_s+" s"),"")+chip("camera transfer "+(n.avg_fetch_ms||s.frame.fetch_ms)+" ms","")+chip("decision latency ~"+n.latency_s.toFixed(1)+" s","");
   [["rw",s.cfg.rover_w_mm],["rl",s.cfg.rover_l_mm],["mm",s.cfg.margin_mm]].forEach(([i,v])=>{if(document.activeElement!==$(i))$(i).value=v==null?"":v});
   $("clr").textContent="clearance radius "+s.cfg.radius.toFixed(3)+" + margin "+s.cfg.margin.toFixed(3)+" sandbox heights"+(hm?(" (sandbox height "+Math.round(hm)+" mm)"):"");
+  const ms=s.mission;if(ms){const run=ms.state==="running";
+   $("mstart").disabled=!(n.armed&&!run&&n.state!=="running"&&s.pose&&ms.structures.length>0);$("mstart").textContent=run?"MISSION RUNNING...":"START MISSION (arm first)";
+   $("mstat").textContent="mission: "+ms.state+(ms.message?" - "+ms.message:"")+"  ("+ms.structures.length+" structure"+(ms.structures.length==1?"":"s")+")";
+   const act=ms.structures.find(x=>x.id===ms.active&&x.status==="collecting");
+   $("mcount").textContent=act&&ms.countdown!=null?(act.label+" - Collecting — placeholder - "+Math.ceil(ms.countdown)+" s"):"";
+   $("mlist").innerHTML=ms.structures.map(x=>"<div>"+x.label+": "+x.status_text+(x.reason?" ("+x.reason+")":"")+"</div>").join("");
+   if(document.activeElement!==$("mdw")&&run)$("mdw").value=ms.dwell_s;}
   $("log").textContent=s.log.join("\n");$("recn").textContent=s.recording?("recording "+s.recording.n+" frames"):"";$("rec").textContent=s.recording?"Stop recording":"Record depth+RGB";
 }
 async function poll(){
@@ -132,6 +148,7 @@ $("live").addEventListener("click",e=>{if(!S||!S.frame.size)return;const r=e.tar
   pick({px:(e.clientX-r.left)/r.width*S.frame.size[0],py:(e.clientY-r.top)/r.height*S.frame.size[1]})});
 $("arm").onchange=async e=>{const r=await post("/api/arm",{armed:e.target.checked});if(r.error){say(r.error);e.target.checked=false}};
 $("start").onclick=async()=>{const r=await post("/api/start");if(r.error||r.ok===false)say(r.error||r.msg)};
+$("mstart").onclick=async()=>{const r=await post("/api/mission/start",{dwell_s:+$("mdw").value,gap_mm:+$("mgap").value});if(r.error||r.ok===false)say(r.error||r.msg)};
 const STOP=()=>post("/api/stop");$("stop").onclick=STOP;
 addEventListener("keydown",e=>{if(e.code==="Space"&&e.target.tagName!=="INPUT"){e.preventDefault();STOP()}});
 $("rw").onchange=$("rl").onchange=$("mm").onchange=()=>post("/api/config",{rover_w_mm:+$("rw").value,rover_l_mm:+$("rl").value,margin_mm:+$("mm").value});

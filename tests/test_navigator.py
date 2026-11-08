@@ -643,6 +643,434 @@ def test_repeated_unsafe_actions_are_bounded_and_do_not_oscillate():
     assert len(_moves(rover)) <= 6 and w.collisions == 0, _moves(rover)
 
 
+# ---------------------------------------------------------------------------------------------- recovery safety (cancel / fresh / valid)
+def _recovery_world():
+    w = S.SimWorld(obstacles_mm=WALL, rover=(250.0, 400.0, 0.0))
+    per, nav, rover = make(w)
+    nav.marker_off, nav.turn_dir = 0.0, {"Q": -1.0, "E": 1.0}
+    nav.observe(1)
+    nav.target = norm_of(900.0, 400.0)
+    per.map_frozen = True
+    return w, per, nav, rover
+
+
+def test_stop_during_recovery_frame_wait_never_moves_the_rover():
+    """The reproduced bug: STOP/disarm while recovery waits for its fresh frame must not be followed by a back-away move."""
+    w, per, nav, rover = _recovery_world()
+    real_wait = w.wait_fresh
+
+    def stopping(min_seq, timeout=5.0):
+        nav.stop()                                           # operator STOP arrives while the frame is awaited
+        return real_wait(min_seq, timeout)
+    w.wait_fresh = stopping
+    pose = per.last_obs.pose
+    act = {"kind": "burst", "cmd": "F", "dur": 1.0, "speed": 0.3, "trim": 0.0, "text": "F (test)"}
+    obs, bad = nav._recover_unsafe(pose, act, "forced (test)")
+    assert obs is None and bad == "stopped", bad
+    assert not _moves(rover), _moves(rover)
+
+
+def test_move_and_cruise_are_refused_after_cancellation():
+    w, per, nav, rover = _recovery_world()
+    nav.armed = False
+    nav._move("F", 0.3, 0.3, 0.0)
+    nav._cruise({"l": 0.3, "r": 0.3})
+    assert not _moves(rover) and not [x for x in rover.sent if x[0] == "DRIVE"]
+
+
+def test_recovery_needs_a_valid_fresh_map_and_pose_before_moving():
+    act = {"kind": "burst", "cmd": "F", "dur": 1.0, "speed": 0.3, "trim": 0.0, "text": "F (test)"}
+    # 1. a map refresh error is not swallowed
+    w, per, nav, rover = _recovery_world()
+
+    def boom(fr, repeats=3):
+        raise RuntimeError("depth decode failed")
+    per.refresh_map = boom
+    obs, bad = nav._recover_unsafe(per.last_obs.pose, act, "forced")
+    assert obs is None and "map refresh failed" in bad and not _moves(rover), bad
+    # 2. a stale frame is rejected
+    w, per, nav, rover = _recovery_world()
+    real = w.wait_fresh
+
+    def stale(min_seq, timeout=5.0):
+        f = real(min_seq, timeout)
+        f.rx = time.time() - 30.0
+        return f
+    w.wait_fresh = stale
+    obs, bad = nav._recover_unsafe(per.last_obs.pose, act, "forced")
+    assert obs is None and "old" in bad and not _moves(rover), bad
+    # 3. the fresh pose has the whole footprint over the boundary: physical reset, no movement
+    w, per, nav, rover = _recovery_world()
+    w.u = 15.0
+    obs, bad = nav._recover_unsafe(per.last_obs.pose, act, "forced")
+    assert obs is None and ("outside" in bad or "boundary" in bad), bad
+    assert not _moves(rover)
+
+
+def test_obstacle_map_age_limit_is_ten_seconds():
+    w = S.SimWorld(obstacles_mm=[], rover=(250.0, 400.0, 0.0))
+    per, nav, rover = make(w)
+    assert nav.cfg["map_max_age_s"] == 10.0 and nav.cfg["map_period_s"] < 10.0
+
+
+# ---------------------------------------------------------------------------------------------- structure visits
+TWO = [(700.0, 250.0, 780.0, 330.0, 100.0), (1100.0, 550.0, 1200.0, 640.0, 90.0)]
+
+
+def _mission_world(obstacles, rover=(250.0, 400.0, 0.0), dwell=0.6):
+    import mission as M
+    w = S.SimWorld(obstacles_mm=obstacles, rover=rover)
+    per, nav, rv = make(w, rover_w_mm=170.0, rover_l_mm=170.0, margin_mm=15.0)
+    nav.marker_off, nav.turn_dir = 0.0, {"Q": -1.0, "E": 1.0}
+    nav.observe(1)
+    for _ in range(2):
+        per.snapshot(w.render())
+    nav.pose = per.last_obs.pose
+    return w, per, nav, rv, M.Mission(nav, dwell_s=dwell, poll_s=0.1)
+
+
+def test_structures_exclude_rover_edge_specks_and_merge_fragments():
+    import mission as M
+    w, per, nav, rv, m = _mission_world(TWO)
+    dm = per.depth_map
+    dm.ev[0:2, 5] = 1.0                                           # occupied cells hugging the boundary edge: not a structure
+    dm.seen[30, 20] = False                                       # a lone unknown speck: stays blocked, is not a structure
+    cl = M.detect_structures(per, nav)
+    assert len(cl) == 2, [(round(c["cx"], 2), round(c["cy"], 2), len(c["cells"])) for c in cl]
+    rx, ry = per.last_obs.pose["x"], per.last_obs.pose["y"]
+    assert all(math.hypot((c["cx"] - rx) * per.calib.aspect, c["cy"] - ry) > 0.2 for c in cl), "the rover is not a structure"
+    assert (20, 30) in set(map(tuple, dm.unknown_cells())), "unknown space must stay blocked"
+    # a no-depth object (dark/shiny) is ONE structure, not many
+    d = w.render().depth
+    cx, cy = [int(v) for v in per.calib.to_px([(0.30, 0.8)])[0]]
+    d[cy - 12:cy + 12, cx - 14:cx + 14] = 0
+    for _ in range(3):
+        dm.update(d, per.calib, rover=None, rover_exclude=0.0)
+    cl2 = M.detect_structures(per, nav)
+    assert len(cl2) == 3 and sum(1 for c in cl2 if c["occ"] == 0) == 1, [(len(c["cells"]), c["occ"], c["unk"]) for c in cl2]
+
+
+def test_structure_identity_is_stable_across_jitter_and_refreshes():
+    import mission as M
+    w, per, nav, rv, m = _mission_world(TWO)
+    book = m.book
+    book.update(M.detect_structures(per, nav), per.calib)
+    assert [s.label for s in book.items] == ["S1", "S2"]
+    book.items[0].status = "complete"
+    for k in range(4):                                             # refreshes with jitter in the detections
+        cl = M.detect_structures(per, nav)
+        for c in cl:
+            c["cx"] += 0.004 * (-1) ** k
+            c["cy"] += 0.006 * (-1) ** k
+        book.update(cl, per.calib)
+    assert [(s.id, s.label) for s in book.items] == [(1, "S1"), (2, "S2")], [(s.id, s.label) for s in book.items]
+    assert book.items[0].status == "complete", "a visited structure must not be re-queued by a refresh"
+    cl = M.detect_structures(per, nav) + [{"cells": [(5, 5)] * 4, "occ": 4, "unk": 0, "cx": 0.2, "cy": 0.2, "bbox": (0.1, 0.1, 0.2, 0.2)}]
+    book.update(cl, per.calib)
+    assert [s.label for s in book.items] == ["S1", "S2", "S3"]
+
+
+def test_inspection_point_is_near_outside_the_footprint_and_fits_the_whole_rover():
+    import mission as M
+    w, per, nav, rv, m = _mission_world(TWO)
+    m.book.update(M.detect_structures(per, nav), per.calib)
+    for st in m.book.items:
+        pt, ln, why = m.plan_inspection(st)
+        assert pt is not None, why
+        assert nav.validate_target(*pt)["ok"], "the whole rover (+ clearance) must fit at the inspection point"
+        gap = m._gap_mm(nav_pose(pt), st.cells)
+        assert M.MIN_CLEAR_MM < gap <= m.gap_mm + M.RING_FRAC * per.calib.height_mm + 5, gap       # outside the footprint, but near
+        assert not nav.make_plan((nav.pose["x"], nav.pose["y"]), target=pt)["error"]
+
+
+def nav_pose(pt):
+    return {"x": pt[0], "y": pt[1]}
+
+
+def test_mission_visits_every_structure_with_a_timed_placeholder_dwell():
+    w, per, nav, rv, m = _mission_world(TWO, dwell=0.8)
+    nav.armed = True
+    seen = []
+    t0 = time.time()
+    ok, msg = m.start()
+    assert ok, msg
+    while m.running():
+        snap = m.snapshot()
+        if snap["countdown"] is not None and snap["active"]:
+            seen.append((snap["active"], snap["countdown"]))
+        time.sleep(0.05)
+    assert m.state == "complete", (m.state, m.message, m.log)
+    assert [s.status for s in m.book.items] == ["complete", "complete"] and [s.label for s in m.book.items] == ["S1", "S2"]
+    assert time.time() - t0 >= 2 * 0.8, "each visit must dwell the full time"
+    assert seen and all(0 <= c <= 0.8 for _, c in seen) and {a for a, _ in seen} == {1, 2}, seen[:3]
+    assert nav.armed is False and w.collisions == 0
+    assert len([x for x in m.log if "mm clear" in x]) == 2, m.log
+
+
+def test_stop_during_the_dwell_cancels_the_mission_for_good():
+    w, per, nav, rv, m = _mission_world(TWO, dwell=3.0)
+    nav.armed = True
+    ok, msg = m.start()
+    assert ok, msg
+    t_end = time.time() + 60
+    while time.time() < t_end and not any(s.status == "collecting" for s in m.book.items):
+        time.sleep(0.05)
+    assert any(s.status == "collecting" for s in m.book.items), m.log
+    m.cancel("stopped by operator")
+    nav.stop()
+    m.join(10)
+    assert not m.running() and m.state == "cancelled", (m.state, m.message)
+    n_sent = len(rv.sent)
+    time.sleep(1.0)
+    assert len(rv.sent) == n_sent, "nothing may move or resume after STOP"
+    assert nav.armed is False
+    assert all(s.status == "cancelled" for s in m.book.items), [(s.label, s.status) for s in m.book.items]
+    ok, msg = m.start()
+    assert not ok and "armed" in msg                              # no restart without a new explicit Arm + START
+
+
+def test_disarm_between_legs_prevents_the_next_leg():
+    w, per, nav, rv, m = _mission_world(TWO, dwell=0.3)
+    nav.armed = True
+    real_dwell = m.dwell
+
+    def dwell_then_disarm(st, arr):
+        r = real_dwell(st, arr)
+        nav.armed = False                                          # operator disarms right as the first visit ends
+        return r
+    m.dwell = dwell_then_disarm
+    ok, msg = m.start()
+    m.join(60)
+    assert m.state == "cancelled", (m.state, m.message)
+    assert [s.status for s in m.book.items].count("complete") <= 1
+    n = len(rv.sent)
+    time.sleep(0.6)
+    assert len(rv.sent) == n
+
+
+def test_dwell_is_not_counted_when_the_structure_moves():
+    w, per, nav, rv, m = _mission_world(TWO[:1], dwell=2.0)
+    nav.armed = True
+    m.map_every = 0.4
+    real = m._matching
+    calls = {"n": 0}
+
+    def vanishing(st):
+        calls["n"] += 1
+        return real(st) if calls["n"] == 1 else None              # the structure "moves" during the dwell
+    m._matching = vanishing
+    ok, msg = m.start()
+    m.join(120)
+    st = m.book.items[0]
+    assert st.status != "complete" and st.visited_at is None, (st.status, st.reason, m.log)
+    assert "moved or vanished" in " ".join(m.log), m.log
+    assert nav.armed is False
+
+
+def test_unreachable_structures_are_reported_not_visited():
+    barrier = (520.0, -10.0, 580.0, 810.0, 120.0)                 # full-height wall: the structure beyond it cannot be reached
+    far = (900.0, 300.0, 980.0, 380.0, 100.0)
+    w, per, nav, rv, m = _mission_world([barrier, far], rover=(250.0, 400.0, 0.0), dwell=0.4)
+    nav.armed = True
+    ok, msg = m.start()
+    m.join(120)
+    assert m.state == "complete", (m.state, m.message, m.log)
+    st = {s.status for s in m.book.items}
+    assert "unreachable" in st and "complete" in st, [(s.label, s.status, s.reason) for s in m.book.items]
+    far_s = max(m.book.items, key=lambda s: s.cx)
+    assert far_s.status == "unreachable" and far_s.reason
+    assert w.collisions == 0
+
+
+def test_page_load_and_unarmed_start_never_start_a_mission():
+    w, per, nav, rv, m = _mission_world(TWO)
+    nav.armed = False
+    m.refresh_preview()
+    m.snapshot()
+    assert not m.running() and m.state == "idle" and not _moves(rv)
+    ok, msg = m.start()
+    assert not ok and "armed" in msg and not m.running()
+
+
+# ---------------------------------------------------------------------------------------------- blocked turn / no-route regressions
+CORNER = [(520.0, 330.0, 580.0, 470.0, 120.0)]
+
+
+def _tight_world(d_mm, heading=math.pi / 2):
+    """Rover 'd_mm' diagonally from the obstacle's corner, facing north, needing to go east: a turn is needed right where the
+    swept footprint (170 mm square, 120 mm turning radius) approaches the obstacle (the 127 mm-from-the-corner situation)."""
+    u, v = 520.0 - d_mm * 0.7071, 330.0 - d_mm * 0.7071
+    w = S.SimWorld(obstacles_mm=CORNER, rover=(u, v, heading), diff=True)
+    per, nav, rover = make(w, rover_w_mm=170.0, rover_l_mm=170.0, margin_mm=15.0)
+    per.dims_hist = [(170.0, 170.0)] * 5                         # the configured footprint, not the sim's smaller body
+    nav.marker_off, nav.turn_dir = 0.0, {"Q": -1.0, "E": 1.0}
+    nav.observe(1)
+    return w, per, nav, rover
+
+
+def test_navigation_from_a_tight_pose_near_an_obstacle_corner_no_longer_dead_ends():
+    """Symptom 1: planner and guard disagreed about turning room at the START pose, so a planned route ended in 'blocked / no
+    safe alternative'. Now the planner honours heading + turn room, and recovery shortens, aligns or relocates (guarded)."""
+    tgt = norm_of(900.0, 235.0)
+    for d in (112, 116, 124, 136, 140):
+        w, per, nav, rover = _tight_world(d)
+        run(nav, tgt, timeout=120)
+        assert nav.state == "done", (d, nav.state, nav.reason[:200])
+        assert w.collisions == 0, d
+        assert nav.target == tgt and mm_error(w, tgt, per.calib.height_mm) <= 50.0, d
+
+
+def test_planner_will_not_start_with_a_rotation_where_the_rover_cannot_rotate():
+    wps = geom.plan_oriented((0.5, 0.5), (0.9, 0.5), [], 40, 20, 0.1, 0.1, 0.01, 1.5, heading=math.pi / 2,
+                             start_arc_max=math.radians(40), start_turn_blocked=True)
+    assert not wps["error"]
+    p1 = wps["waypoints"][1]
+    assert abs(p1[0] - 0.5) < 0.05, ("first leg must follow the current heading (north/south), not turn east in place", wps["waypoints"])
+    free = geom.plan_oriented((0.5, 0.5), (0.9, 0.5), [], 40, 20, 0.1, 0.1, 0.01, 1.5, heading=math.pi / 2,
+                              start_arc_max=math.radians(40), start_turn_blocked=False)
+    assert abs(free["waypoints"][1][0] - 0.5) > 0.05, "with turning room the old behaviour (turn first) is unchanged"
+
+
+def test_rover_boxed_into_a_clearance_halo_makes_guarded_room_or_reports_the_geometry():
+    """Symptom 2 class: 'no route' from a pose inside an obstacle's clearance halo although a route exists a few cm away."""
+    w, per, nav, rover = _tight_world(116)
+    tgt = norm_of(900.0, 235.0)
+    pose = per.last_obs.pose
+    res = nav.make_plan((pose["x"], pose["y"]), target=tgt, heading=pose["theta"])
+    diag = nav._diagnose_route((pose["x"], pose["y"]), tgt)
+    assert "neighbours free" in diag and "mm from the centre" in diag, diag
+    run(nav, tgt, timeout=120)
+    assert nav.state == "done" and w.collisions == 0, (nav.state, nav.reason[:200])
+    assert nav._room_moves >= 1 or nav.timing["unsafe_stops"] >= 1 or not res["error"]
+
+
+def test_failure_evidence_is_written_and_identical_replans_are_not_repeated():
+    import glob
+    import json
+    wall = (700.0, 0.0, 780.0, float(S.H_MM), 120.0)
+    w, per, nav, rover = _refresh_run(period=0.1, obstacle=wall, at_step=3, no_route_hold_s=1.2)
+    calls = {"n": 0}
+    real = nav.make_plan
+
+    def counting(*a, **k):
+        calls["n"] += 1
+        return real(*a, **k)
+    nav.make_plan = counting
+    run(nav, norm_of(1000.0, 400.0))
+    assert nav.state == "failed" and "replan" in nav.reason and "neighbours free" in nav.reason, nav.reason
+    files = glob.glob(os.path.join(nav.dir, "fail_*.json"))
+    assert files, "failure evidence must be kept on disk"
+    d = json.load(open(files[-1]))
+    assert d["why"] and d["map"]["cells"] and d["target"] and "obstacle_rects_near" in d
+    assert calls["n"] <= 14, "the hold must not replan the same thing over and over (%d plans)" % calls["n"]
+
+
+def test_soft_failure_keeps_authorisation_only_for_route_class_failures_during_a_mission():
+    w = S.SimWorld(obstacles_mm=[], rover=(250.0, 400.0, 0.0))
+    per, nav, rover = make(w)
+    nav.keep_armed = True
+    nav._fail("replan: no route (test)")
+    assert nav.state == "failed" and nav.armed is True and nav.soft_failed, "route-class failure keeps the mission authorised"
+    nav.armed = True
+    nav._fail("rover not found in a fresh frame (tracking lost)")
+    assert nav.armed is False and not nav.soft_failed, "terminal safety failures always disarm"
+    nav.armed = True
+    nav._fail("replan: no route (test)")
+    nav.stop_flag.set()
+    nav._fail("replan: no route (test)")
+    assert nav.armed is False, "after STOP nothing stays armed"
+    nav.keep_armed, nav.stop_flag, nav.armed = False, nav.stop_flag, True
+    nav.stop_flag.clear()
+    nav._fail("replan: no route (test)")
+    assert nav.armed is False, "outside a mission every failure disarms (unchanged)"
+
+
+def test_mission_tries_another_inspection_position_near_the_same_structure():
+    w, per, nav, rv, m = _mission_world(TWO, dwell=0.3)
+    nav.armed = True
+    real = m.plan_inspection
+    first = {"S": None}
+
+    def bad_first(st, exclude=()):
+        if first["S"] is None:
+            first["S"] = st.id
+            return (st.cx, st.cy), 0.0, ""                       # inside the structure itself (cheapest, so chosen first): unusable
+        return real(st, exclude)
+    m.plan_inspection = bad_first
+    ok, msg = m.start()
+    m.join(180)
+    assert m.state == "complete", (m.state, m.message, m.log)
+    st = next(s for s in m.book.items if s.id == first["S"])
+    assert st.status == "complete" and st.attempts == 2 and st.tried, (st.status, st.attempts, st.tried)
+    assert all(s.status == "complete" for s in m.book.items) and w.collisions == 0
+    assert any("inaccessible" in x for x in m.log), m.log
+    assert nav.armed is False
+
+
+def test_structure_with_no_usable_position_is_reported_and_the_mission_continues():
+    w, per, nav, rv, m = _mission_world(TWO, dwell=0.3)
+    nav.armed = True
+    real = m.plan_inspection
+    victim = {"id": None}
+
+    def stubborn(st, exclude=()):
+        if victim["id"] is None:
+            victim["id"] = st.id
+        if st.id == victim["id"]:
+            return (st.cx, st.cy), 1.0, ""                       # every offered position is unusable
+        return real(st, exclude)
+    m.plan_inspection = stubborn
+    ok, msg = m.start()
+    m.join(240)
+    assert m.state == "complete", (m.state, m.message, m.log)
+    stat = {s.id: s.status for s in m.book.items}
+    assert stat[victim["id"]] == "unreachable" and [v for k, v in stat.items() if k != victim["id"]] == ["complete"], stat
+    assert "attempts" in next(s for s in m.book.items if s.id == victim["id"]).reason
+    assert nav.armed is False and w.collisions == 0
+
+
+def test_stop_after_a_soft_failure_still_cancels_the_whole_mission():
+    w, per, nav, rv, m = _mission_world(TWO, dwell=0.3)
+    nav.armed = True
+    real = m.plan_inspection
+    state = {"n": 0}
+
+    def once_bad_then_stop(st, exclude=()):
+        state["n"] += 1
+        if state["n"] == 1:
+            return (st.cx, st.cy), 1.0, ""
+        if state["n"] == 2:                                      # operator hits STOP right after the soft failure
+            m.cancel("stopped by operator")
+            nav.stop()
+        return real(st, exclude)
+    m.plan_inspection = once_bad_then_stop
+    ok, msg = m.start()
+    m.join(120)
+    assert m.state == "cancelled" and nav.armed is False, (m.state, m.message)
+    n = len(rv.sent)
+    time.sleep(0.6)
+    assert len(rv.sent) == n and not any(s.status == "complete" for s in m.book.items)
+
+
+def test_rover_remnant_cells_are_not_a_structure_but_a_structure_beside_it_is():
+    import mission as M
+    w, per, nav, rv, m = _mission_world(TWO)
+    pose = per.last_obs.pose
+    dm, A, hm = per.depth_map, per.calib.aspect, per.calib.height_mm
+    L, W, _m = nav.footprint()
+    ring = math.hypot(L, W) / 2 * hm + 40.0                         # just OUTSIDE the cell-exclusion circle (rover + 10 mm)
+    n0 = len(M.detect_structures(per, nav))
+    for k in range(8):                                              # an octagon of occupied cells hugging the rover = its own fringe
+        a = k * math.pi / 4
+        c = int((pose["x"] + math.cos(a) * ring / (A * hm)) * dm.cols)
+        r = int((pose["y"] + math.sin(a) * ring / hm) * dm.rows)
+        dm.ev[r:r + 2, c:c + 2] = 1.0
+    assert len(M.detect_structures(per, nav)) == n0, "rover remnants must not become a structure"
+    far = int((pose["x"] + 0.25) * dm.cols)                         # a real object a clear gap beside the rover stays a structure
+    dm.ev[int(pose["y"] * dm.rows) - 2:int(pose["y"] * dm.rows) + 2, far:far + 3] = 1.0
+    assert len(M.detect_structures(per, nav)) == n0 + 1
+
+
 if __name__ == "__main__":
     fails = 0
     for k, v in list(globals().items()):

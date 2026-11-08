@@ -22,7 +22,7 @@ class SimFrame:
 
 class SimWorld:
     def __init__(self, obstacles_mm=None, rover=(300.0, 250.0, 0.4), cam_rot=0.0, rot_sign=-1, fwd_offset=0.0,
-                 fwd_speed=140.0, rot_rate=math.radians(55), noise=True, seed=3, marker=True, responsive=True, diff=False, imu_sign=-1, imu_bias=0.9):
+                 fwd_speed=140.0, rot_rate=math.radians(55), noise=True, seed=3, marker=True, responsive=True, diff=False, imu_sign=-1, imu_bias=0.9, rover_holes=False):
         self.obstacles = obstacles_mm or []      # (u0,v0,u1,v1,height_mm)
         self.u, self.v, self.th = rover
         self.cam_rot, self.rot_sign, self.fwd_offset = cam_rot, rot_sign, fwd_offset
@@ -36,6 +36,7 @@ class SimWorld:
         self.driving = None            # (left, right) wheel command being streamed
         self.stale_stop_log = []
         self.diff, self.imu_sign, self.imu_bias = diff, imu_sign, imu_bias
+        self.rover_holes = rover_holes           # the real rover's dark body returns NO depth (holes), as on the live camera
 
     def _hits(self, u, v, th):
         """True if the rover's actual footprint (150 x 110 mm rectangle along its heading) overlaps an obstacle."""
@@ -104,6 +105,12 @@ class SimWorld:
             depth += self.rng.normal(0, 3, depth.shape)
             depth[self.rng.random(depth.shape) < 0.04] = 0
             bgr = np.clip(bgr.astype(np.int16) + self.rng.normal(0, 3, bgr.shape).astype(np.int16), 0, 255).astype(np.uint8)
+        if self.rover_holes:
+            c0, s0 = math.cos(self.th + self.fwd_offset), math.sin(self.th + self.fwd_offset)
+            inner = [(self.u + c0 * lu * 0.8 - s0 * lv * 0.8, self.v + s0 * lu * 0.8 + c0 * lv * 0.8) for lu, lv in ((-75, -55), (75, -55), (75, 55), (-75, 55))]
+            m = np.zeros(depth.shape, np.uint8)
+            cv2.fillConvexPoly(m, self._poly(inner, 80).astype(np.int32), 1)
+            depth[m.astype(bool)] = 0
         # outside the field of view / invalid
         depth = np.clip(depth, 0, 65535).astype(np.uint16)
         f = SimFrame()
