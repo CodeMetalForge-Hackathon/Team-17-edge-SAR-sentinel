@@ -1,2 +1,0 @@
-# Shell scripts run on the Pi: keep LF line endings even on a Windows checkout
-*.sh text eol=lf
