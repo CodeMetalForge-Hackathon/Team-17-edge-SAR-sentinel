@@ -23,6 +23,39 @@ def corners_path(image):
     return os.path.join(HERE, "corners_" + os.path.splitext(base)[0] + ".json")
 
 
+# ---- "Take photo": capture on the aerial Zero over SSH and replace the image file atomically ----
+CAPTURE = {"target": None, "w": 1280, "h": 720}
+_capture_lock = threading.Lock()
+
+
+def take_photo(image):
+    """Run rpicam-still on the Zero, copy the JPEG here, then rename it over the image (never half-written).
+    Needs passwordless SSH from this machine to the Zero (ssh-copy-id), started with --zero user@host."""
+    import subprocess
+    if not CAPTURE["target"]:
+        return 400, {"error": "server started without --zero user@host, so it cannot take photos"}
+    if not _capture_lock.acquire(blocking=False):
+        return 409, {"error": "a photo is already being taken"}
+    try:
+        opts = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=6", "-o", "StrictHostKeyChecking=accept-new"]
+        t, w, h = CAPTURE["target"], CAPTURE["w"], CAPTURE["h"]
+        shot = "rpicam-still -n -t 1500 --width %d --height %d -o /tmp/shot.jpg" % (w, h)
+        tmp = image + ".part"
+        for cmd in (["ssh"] + opts + [t, shot], ["scp", "-q"] + opts + [t + ":/tmp/shot.jpg", tmp]):
+            try:
+                r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            except subprocess.TimeoutExpired:
+                return 504, {"error": "timed out talking to %s (is the Zero on and on Tailscale?)" % t}
+            if r.returncode != 0:
+                tail = (r.stderr or r.stdout).strip().splitlines()[-1:] or [""]
+                hint = " (run ssh-copy-id %s once on this Pi)" % t if "ermission denied" in r.stderr else ""
+                return 502, {"error": "%s failed: %s%s" % (cmd[0], tail[0], hint)}
+        os.replace(tmp, image)
+        return 200, {"image_mtime": os.stat(image).st_mtime}
+    finally:
+        _capture_lock.release()
+
+
 # ---- automatic rubble detection (before photo vs current photo), see detect.py ----
 DEBUG_PNG = os.path.join(HERE, "detect_debug.png")
 
@@ -202,6 +235,8 @@ def make_handler(image_path, rover):
                     code, body = rover.arm(d.get("armed"))
                 elif path == "/api/move":
                     code, body = rover.move(d)
+                elif path == "/api/capture":
+                    code, body = take_photo(image_path)
                 elif path == "/api/before":
                     code, body = save_before(image_path)
                 elif path == "/api/detect":
@@ -239,10 +274,14 @@ if __name__ == "__main__":
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--enable-motion", action="store_true", help="allow the UI to arm and send motion commands (default OFF)")
     ap.add_argument("--dry-run", action="store_true", help="rover commands are logged, not sent")
+    ap.add_argument("--zero", help="user@host of the aerial Zero, enables the Take photo button (passwordless SSH)")
+    ap.add_argument("--capture-size", default="1280x720", help="photo size WxH; keep it equal to the calibrated photo")
     a = ap.parse_args()
     if not os.path.exists(a.image):
         raise SystemExit("image not found: " + a.image)
     CORNERS = corners_path(a.image)
+    CAPTURE["target"] = a.zero
+    CAPTURE["w"], CAPTURE["h"] = (int(v) for v in a.capture_size.lower().split("x"))
     rover = Rover(a.image, a.enable_motion, a.dry_run)
     print("scenario file:", CORNERS)
     print("Overhead viewer: http://127.0.0.1:%d  (image: %s) motion=%s dry_run=%s" % (a.port, a.image, "ENABLED-for-arming" if a.enable_motion else "OFF", a.dry_run))

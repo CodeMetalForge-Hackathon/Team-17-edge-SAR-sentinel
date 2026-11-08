@@ -53,3 +53,13 @@ Command-line check without the page:
     python detect.py --before before.jpg --after after.jpg --corners corners.json --cols 6 --rows 4 --debug out.png
 
 Tuning (top of `detect.py`): `DIFF_THRESH` (raise if shadows or glare show up as rubble), `MIN_AREA_FRAC` (raise to drop small specks), `L_WEIGHT` (lower to ignore brightness changes more). Keep the camera, focus and exposure fixed between BEFORE and the detection photo, and retake BEFORE before each run.
+
+### Take photo button
+
+Start the viewer with `--zero zero@100.96.176.12` and the page gets a **Take photo** button: the server runs `rpicam-still` on the aerial Zero over SSH, copies the JPEG back, swaps it in atomically, and the page reloads it. One-time setup on the HQ Pi so SSH needs no password:
+
+    ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519   # only if ~/.ssh/id_ed25519 does not exist yet
+    ssh-copy-id zero@100.96.176.12
+    ssh -o BatchMode=yes zero@100.96.176.12 echo ok      # must print ok without asking for a password
+
+Photos are taken at `--capture-size` (default 1280x720), which must match the photo the corners were calibrated on.

@@ -26,6 +26,7 @@
   <label>extra margin (normalized) <input id="margin" type="number" min="0" max="0.2" step="0.005" value="0.01"></label>
   <label>mode <select id="mode"><option value="inspect">Inspect coordinate</option><option value="obst">Draw obstacle footprint</option><option value="roverbox">Draw rover footprint</option><option value="heading">Set rover forward direction</option><option value="target">Set target cell</option></select></label>
   <button id="delfp">Delete selected footprint</button>
+  <button id="shoot" title="Take a new photo on the aerial Zero, then load it">Take photo</button>
   <button id="reload">Reload image</button>
   <button id="setbefore" title="Use the current photo of the EMPTY sandbox as the reference">Save as BEFORE</button>
   <button id="detect" title="Compare the current photo with BEFORE and turn changes into obstacle footprints">Detect rubble</button>
@@ -475,6 +476,17 @@ $("save").onclick = async () => {
 $("reload").onclick = () => reloadImage().catch(e => setStatus(false, "reload error: " + e));
 $("confirm").onclick = () => { if (err) { $("route").textContent = "Cannot confirm: " + err; return; } confirmed = true; replan(); draw(); };
 $("confirmfp").onclick = () => { fconfirmed = true; replan(); draw(); };
+
+// ---- Take photo: the server captures on the aerial Zero, then we reload it (pose and confirmations reset) ----
+$("shoot").onclick = async () => {
+  $("shoot").disabled = true; $("shoot").textContent = "Taking photo...";
+  try {
+    const [c, j] = await api("/api/capture", {});
+    if (c !== 200) { $("route").textContent = "Take photo failed: " + (j.error || c) + "\n" + $("route").textContent; return; }
+    await reloadImage();
+  } catch (e) { setStatus(false, "photo error: " + e); }
+  finally { $("shoot").disabled = false; $("shoot").textContent = "Take photo"; }
+};
 
 // ---- automatic rubble detection (server runs detect.py: BEFORE photo vs current photo) ----
 function note(msg) { $("route").textContent = msg + "\n" + $("route").textContent; }
