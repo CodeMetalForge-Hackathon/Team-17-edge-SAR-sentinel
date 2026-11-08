@@ -1,0 +1,54 @@
+{
+  "contract": "SW-05",
+  "branch": "codex/SW-05",
+  "base": "main",
+  "attempt_budget": 4,
+  "stall_window": 2,
+  "required_modules": [
+    "numpy",
+    "sklearn",
+    "joblib",
+    "pytest"
+  ],
+  "allowed_paths": [
+    "pi/brain.py",
+    "pi/policy.py",
+    "pi/config.py",
+    "pi/dashboard.py",
+    "pi/simulate.py",
+    "pi/bus.py",
+    "TODO.md",
+    "README.md",
+    "docs/evidence/SW-05/*",
+    "docs/drafts/SW-05/*"
+  ],
+  "stages": [
+    {
+      "name": "regression",
+      "tests": [
+        "tests/test_core.py",
+        "tests/test_guardrail_invariants.py",
+        "tests/contract/test_sw01_vib_semantics.py",
+        "tests/contract/test_sw03_reset_hazards.py",
+        "tests/contract/test_sw04_freshness_fusion.py",
+        "tests/contract/test_sw02_beacon_mask.py",
+        "tests/contract/test_sw00_launcher.py"
+      ],
+      "min_tests": 59,
+      "timeout_s": 180
+    },
+    {
+      "name": "acceptance",
+      "tests": [
+        "tests/contract/test_sw05_region_holdoff.py"
+      ],
+      "min_tests": 10,
+      "timeout_s": 180
+    }
+  ],
+  "physical_outstanding": [
+    "HW-D1: measured region set in config",
+    "INT-01: a person outside the region is ignored"
+  ],
+  "stronger_review_required": true
+}

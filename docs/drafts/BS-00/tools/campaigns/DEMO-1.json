@@ -1,0 +1,76 @@
+{
+  "campaign": "DEMO-1",
+  "branch": "codex/DEMO-1",
+  "review_provenance": "hook",
+  "objective": "Software spine of the demo: reset-safe, stale-safe, hazard-correct, honestly worded, launched by one script, ready for the Pi bench",
+  "stages": [
+    {
+      "id": "SW-00",
+      "attempts": 3,
+      "stronger_review": false,
+      "needs": []
+    },
+    {
+      "id": "SW-01",
+      "attempts": 4,
+      "stronger_review": true,
+      "needs": []
+    },
+    {
+      "id": "SW-03",
+      "attempts": 4,
+      "stronger_review": true,
+      "needs": [
+        "SW-01"
+      ]
+    },
+    {
+      "id": "SW-04",
+      "attempts": 4,
+      "stronger_review": true,
+      "needs": [
+        "SW-03"
+      ]
+    },
+    {
+      "id": "SW-02",
+      "attempts": 4,
+      "stronger_review": true,
+      "needs": [
+        "SW-04"
+      ]
+    },
+    {
+      "id": "SW-05",
+      "attempts": 4,
+      "stronger_review": true,
+      "needs": [
+        "SW-02"
+      ]
+    },
+    {
+      "id": "SW-06",
+      "attempts": 4,
+      "stronger_review": false,
+      "needs": [
+        "SW-05"
+      ]
+    }
+  ],
+  "budgets": {
+    "wall_hours": 14,
+    "verifier_attempts_per_stage": 4,
+    "opus_review_sessions": 8,
+    "scout_dispatches": 40,
+    "scout_turns": 8,
+    "retries_per_delegated_task": 1,
+    "builder_fix_cycles_per_stage": 3
+  },
+  "human_gates": [
+    "applying any protected-file draft (tests, tools, hooks, settings, contracts, drone_dispatch.py)",
+    "merging or pushing",
+    "any hardware action, flashing or flight",
+    "any spend or budget increase (Opus sessions, time, attempts, downloads)",
+    "a material change of scope"
+  ]
+}

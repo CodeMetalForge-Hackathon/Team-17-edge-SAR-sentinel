@@ -5,7 +5,11 @@ MAP frame: origin at the LiDAR center, +x = the LiDAR's 0 degree direction (forw
 Measure everything below with a tape measure from the LiDAR center.
 """
 
-MQTT_HOST = "localhost"   # broker runs on the Pi (sudo apt install mosquitto)
+import os
+
+# Broker runs on the Pi. On the Pi this stays "localhost".
+# On the laptop, set FORGE_MQTT_HOST to the Pi's IP (mac/dashboard.sh does this for you).
+MQTT_HOST = os.environ.get("FORGE_MQTT_HOST", "localhost")
 MQTT_PORT = 1883
 
 # --- Sensor nodes (Arduinos) ---------------------------------------------

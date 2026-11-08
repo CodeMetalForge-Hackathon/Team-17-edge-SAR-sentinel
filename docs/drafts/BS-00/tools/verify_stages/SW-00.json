@@ -1,0 +1,42 @@
+{
+  "contract": "SW-00",
+  "branch": "codex/SW-00",
+  "base": "main",
+  "attempt_budget": 4,
+  "stall_window": 2,
+  "required_modules": [
+    "numpy",
+    "sklearn",
+    "joblib",
+    "pytest"
+  ],
+  "allowed_paths": [
+    "run_pi.sh",
+    "TODO.md",
+    "docs/evidence/SW-00/*",
+    "docs/drafts/SW-00/*"
+  ],
+  "stages": [
+    {
+      "name": "regression",
+      "tests": [
+        "tests/test_core.py",
+        "tests/test_guardrail_invariants.py"
+      ],
+      "min_tests": 17,
+      "timeout_s": 180
+    },
+    {
+      "name": "acceptance",
+      "tests": [
+        "tests/contract/test_sw00_launcher.py"
+      ],
+      "min_tests": 2,
+      "timeout_s": 60
+    }
+  ],
+  "physical_outstanding": [
+    "INT-01: `./run_pi.sh fly` on the Pi stays in dry-run until a human edits DRONE_DRY_RUN on purpose (no flight is attempted to check this)"
+  ],
+  "stronger_review_required": false
+}

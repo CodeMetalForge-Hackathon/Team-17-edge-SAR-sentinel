@@ -1,0 +1,59 @@
+{
+  "contract": "SW-06",
+  "branch": "codex/SW-06",
+  "base": "main",
+  "attempt_budget": 4,
+  "stall_window": 2,
+  "required_modules": [
+    "numpy",
+    "sklearn",
+    "joblib",
+    "pytest"
+  ],
+  "allowed_paths": [
+    "run_pi.sh",
+    "pi/preflight.py",
+    "pi/config.py",
+    "pi/brain.py",
+    "pi/bus.py",
+    "pi/dashboard.py",
+    "pi/lidar_node.py",
+    "pi/node_bridge.py",
+    "pi/anomaly.py",
+    "TODO.md",
+    "README.md",
+    "docs/evidence/SW-06/*",
+    "docs/drafts/SW-06/*",
+    "mac/*"
+  ],
+  "stages": [
+    {
+      "name": "regression",
+      "tests": [
+        "tests/test_core.py",
+        "tests/test_guardrail_invariants.py",
+        "tests/contract/test_sw01_vib_semantics.py",
+        "tests/contract/test_sw03_reset_hazards.py",
+        "tests/contract/test_sw04_freshness_fusion.py",
+        "tests/contract/test_sw02_beacon_mask.py",
+        "tests/contract/test_sw05_region_holdoff.py",
+        "tests/contract/test_sw00_launcher.py"
+      ],
+      "min_tests": 69,
+      "timeout_s": 180
+    },
+    {
+      "name": "acceptance",
+      "tests": [
+        "tests/contract/test_sw06_startup.py"
+      ],
+      "min_tests": 10,
+      "timeout_s": 180
+    }
+  ],
+  "physical_outstanding": [
+    "INT-01: launcher starts all services on the Pi",
+    "INT-01: laptop dashboard reaches the broker, if used"
+  ],
+  "stronger_review_required": false
+}

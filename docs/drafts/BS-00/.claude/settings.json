@@ -1,0 +1,98 @@
+{
+  "permissions": {
+    "deny": [
+      "Edit(/tests/test_core.py)",
+      "Edit(/tests/test_guardrail_invariants.py)",
+      "Edit(/tests/contract/**)",
+      "Edit(/tools/**)",
+      "Edit(/.claude/**)",
+      "Edit(/CLAUDE.md)",
+      "Edit(/AGENTS.md)",
+      "Edit(/docs/contracts/**)",
+      "Edit(/requirements.txt)",
+      "Edit(/requirements-dev.txt)",
+      "Edit(/.gitignore)",
+      "Edit(/pi/drone_dispatch.py)",
+      "Edit(**/conftest.py)",
+      "Edit(/pytest.ini)",
+      "Edit(/tox.ini)",
+      "Edit(/setup.cfg)",
+      "Edit(/pyproject.toml)",
+      "Bash(git commit *)",
+      "Bash(git push *)",
+      "Bash(git merge *)",
+      "Bash(git rebase *)",
+      "Bash(git reset *)",
+      "Bash(git stash *)",
+      "Bash(git switch *)",
+      "Bash(git config *)",
+      "Bash(git update-ref *)",
+      "Bash(pip *)",
+      "Bash(* -m pip *)",
+      "Bash(curl *)",
+      "Bash(wget *)",
+      "Bash(* --fly*)",
+      "Bash(* --force*)",
+      "PowerShell(git commit *)",
+      "PowerShell(git push *)",
+      "PowerShell(git merge *)",
+      "PowerShell(git rebase *)",
+      "PowerShell(git reset *)",
+      "PowerShell(git stash *)",
+      "PowerShell(git switch *)",
+      "PowerShell(git config *)",
+      "PowerShell(git update-ref *)",
+      "PowerShell(pip *)",
+      "PowerShell(* -m pip *)",
+      "PowerShell(Invoke-WebRequest *)",
+      "PowerShell(* --fly*)",
+      "PowerShell(* --force*)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "^(Write|Edit|MultiEdit|NotebookEdit|Bash|PowerShell)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python",
+            "args": [
+              "${CLAUDE_PROJECT_DIR}/.claude/hooks/protect_paths.py"
+            ],
+            "timeout": 20,
+            "onFailure": "block"
+          }
+        ]
+      },
+      {
+        "matcher": "^(Agent|Task)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python",
+            "args": [
+              "${CLAUDE_PROJECT_DIR}/.claude/hooks/agent_gate.py"
+            ],
+            "timeout": 20,
+            "onFailure": "block"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python",
+            "args": [
+              "${CLAUDE_PROJECT_DIR}/.claude/hooks/record_review.py"
+            ],
+            "timeout": 20
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "why": "Values matching 7a9e315 (identical to 69cf3a7 for every pinned name; MQTT_HOST is an environment lookup now and stays unpinned). Measured values (node positions, ports, camera and LiDAR offsets, DRONE_PAD, MQTT host) are deliberately not pinned. A bench retune is a human edit through APPLY.md and guardrail_admin apply-protected.",
+  "pins": {
+    "pi/config.py": {
+      "DRONE_DRY_RUN": true,
+      "DRONE_MAX_LEG_M": 3.0,
+      "DRONE_HEIGHT_M": 0.5,
+      "DRONE_HOVER_S": 3.0,
+      "AVOID_RADIUS_M": 0.7,
+      "NEAR_RADIUS_M": 0.6,
+      "EVENT_COOLDOWN_S": 15.0,
+      "CHANGE_THRESH_M": 0.25,
+      "CHANGE_MIN_BINS": 3,
+      "CHANGE_PERSIST_SCANS": 3,
+      "PERSON_MIN_CONF": 0.5
+    },
+    "pi/policy.py": {
+      "LOUD_SPIKE": 400,
+      "VIB_STRUCTURAL": 5
+    },
+    "pi/anomaly.py": {
+      "Z_THRESH": 6.0,
+      "IF_QUANTILE": 0.999,
+      "IF_MARGIN": 0.02
+    },
+    "pi/features.py": {
+      "FEATURE_NAMES": ["loud_max", "loud_mean", "loud_std", "light_mean", "light_delta", "pir_frac", "vib_hits", "flame_any", "water_any", "temp", "hum"]
+    }
+  }
+}

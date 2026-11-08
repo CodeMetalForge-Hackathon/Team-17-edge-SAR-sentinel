@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Rover Navigator</title>
+<style>
+:root{--bg:#10151c;--pn:#18202a;--tx:#e6edf3;--mu:#8b98a6;--ok:#2ea043;--bad:#f85149;--wn:#d29922;--ac:#58a6ff}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--tx);font:14px system-ui,sans-serif}
+.wrap{display:grid;grid-template-columns:minmax(0,1fr) 350px;gap:12px;padding:12px;max-width:1350px;margin:auto}
+@media(max-width:950px){.wrap{grid-template-columns:1fr}}
+.pn{background:var(--pn);border-radius:10px;padding:10px;margin-bottom:12px}
+canvas,img.live{width:100%;display:block;border-radius:6px;background:#000;cursor:crosshair;touch-action:none}
+h3{margin:0 0 6px;font-size:13px;color:var(--mu);font-weight:600;text-transform:uppercase;letter-spacing:.04em}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:6px 0}
+button{background:#263241;color:var(--tx);border:0;border-radius:6px;padding:8px 12px;font:inherit;cursor:pointer}
+button:disabled{opacity:.4;cursor:default}
+#start{background:var(--ok);font-weight:700;padding:12px 18px;font-size:16px}
+#stop{background:var(--bad);font-weight:800;font-size:22px;padding:18px;width:100%;letter-spacing:.06em}
+.chip{padding:2px 8px;border-radius:10px;background:#263241;font-size:12px}
+.ok{background:#1b4d2a}.bad{background:#5a1d1a}.wn{background:#4d3a10}
+#badge{font-weight:800;font-size:20px}
+#bar{height:10px;background:#263241;border-radius:5px;overflow:hidden}#bar i{display:block;height:100%;background:var(--ac);width:0}
+pre{margin:0;font:12px ui-monospace,monospace;color:var(--mu);white-space:pre-wrap;max-height:210px;overflow:auto}
+label{color:var(--mu)}input[type=number]{width:64px;background:#0d1117;color:var(--tx);border:1px solid #30363d;border-radius:4px;padding:4px}
+select{background:#0d1117;color:var(--tx);border:1px solid #30363d;border-radius:4px;padding:6px}
+#msg{display:none;padding:8px 10px;border-radius:8px;background:#5a1d1a;margin:6px 0}
+#msg.good{background:#1b4d2a}
+</style></head><body>
+<div class="wrap">
+<div>
+ <div class="pn">
+  <div class="row"><b>Pinpoint the destination</b><span class="chip">click the ground map or the live image</span>
+   <select id="mode"><option value="target">Set target</option><option value="box">Draw obstacle box</option><option value="del">Delete obstacle box</option><option value="mark">Mark structure area (drag)</option><option value="ignore">Ignore area: not a structure (drag)</option><option value="unarea">Remove marked/ignored area (click)</option></select></div>
+  <div id="msg"></div>
+  <h3>Ground map (top-down, to scale)</h3>
+  <canvas id="cv" width="720" height="240"></canvas>
+  <div class="row" style="margin-top:8px"><span class="chip" style="background:#5a1d1a">red = depth obstacles</span><span class="chip" style="background:#4d3a10">orange = manual boxes</span><span class="chip" style="background:#1f4d52">cyan = trajectory + rover footprint sweep</span><span class="chip">dashed = turning circle at corners</span><span class="chip" style="background:#1b4d2a">green ring = arrival tolerance</span></div>
+ </div>
+ <div class="pn"><h3>Live camera (click here to pinpoint on the image)</h3><img class="live" id="live" alt="live"></div>
+ <div class="pn"><h3>RGB + colourised depth (display only; numeric depth is recorded separately)</h3><img class="live" id="cam" style="cursor:default" alt="camera"></div>
+</div>
+<div>
+ <div class="pn">
+  <div class="row"><span id="badge">IDLE</span><span class="chip" id="dry"></span></div>
+  <div id="reason" style="color:var(--mu);min-height:18px"></div>
+  <div id="bar"><i></i></div>
+  <div class="row" style="justify-content:space-between"><span id="prog">no target</span><span id="stepn"></span></div>
+  <div id="tinfo" style="color:var(--mu);font-size:13px"></div>
+  <div class="row"><label><input type="checkbox" id="arm"> Arm motion</label></div>
+  <div class="row"><button id="start">START</button></div>
+  <button id="stop">STOP (space)</button>
+  <button id="restart" style="margin-top:8px;width:100%;background:#30363d;color:#e6edf3;border:1px solid #484f58;border-radius:6px;padding:8px;cursor:pointer">RESTART (fresh mission: stops the rover, clears structures and P(life))</button>
+ </div>
+ <div class="pn"><h3>Structure visits</h3>
+  <div class="row"><label>collect seconds <input type="number" id="mdw" value="15" min="1" max="120" style="width:60px"></label>
+   <label>inspection gap mm <input type="number" id="mgap" value="110" min="60" max="250" style="width:60px"></label></div>
+  <div class="row"><button id="mstart">START MISSION (arm first)</button></div>
+  <div id="mstat" style="color:var(--mu);min-height:18px"></div>
+  <div id="mcount" style="font-weight:600"></div>
+  <div id="mlist" style="font-size:13px"></div>
+ </div>
+ <div class="pn"><h3>Chance of life per structure (UNO Q sensors)</h3>
+  <div id="lstat" style="color:var(--mu);font-size:12px;min-height:16px"></div>
+  <table id="ltab" style="width:100%;border-collapse:collapse;font-size:14px"></table>
+ </div>
+ <div class="pn"><h3>Scene changes (new / moved objects)</h3>
+  <div id="sstat" style="color:var(--mu);font-size:12px;min-height:16px"></div>
+  <div id="elist" style="font-size:13px;margin:6px 0"></div>
+  <pre id="supd" style="max-height:120px"></pre>
+ </div>
+ <div class="pn"><h3>Tracking and timing</h3>
+  <div class="row" id="chips"></div>
+  <div class="row" id="timing"></div>
+  <div class="row"><label>Rover W x L mm <input type="number" id="rw" step="5" min="0" max="600"> x <input type="number" id="rl" step="5" min="0" max="600"></label><label>margin mm <input type="number" id="mm" step="5" min="0" max="200"></label></div>
+  <div class="row"><span class="chip" id="clr"></span></div>
+  <div class="row"><button id="recal">Recalibrate ground</button><button id="clrmap">Clear depth map</button></div>
+  <div class="row"><button id="rec">Record depth+RGB</button><span class="chip" id="recn"></span></div>
+ </div>
+ <div class="pn"><h3>Log</h3><pre id="log"></pre></div>
+</div></div>
+<script>
+const $=id=>document.getElementById(id);const cv=$("cv"),ctx=cv.getContext("2d");
+let S=null,img=new Image(),imgSeq=-1,drag=null,camSeq=-1,liveKey="",d0=1;
+const post=(p,b)=>fetch(p,{method:"POST",headers:{"X-Requested-With":"nav","Content-Type":"application/json"},body:JSON.stringify(b||{})}).then(async r=>({status:r.status,...await r.json()})).catch(e=>({error:String(e)}));
+const X=x=>x*cv.width,Y=y=>(1-y)*cv.height;
+function toNorm(e){const r=cv.getBoundingClientRect();return [(e.clientX-r.left)/r.width,1-(e.clientY-r.top)/r.height]}
+function say(t,good,sug){const m=$("msg");m.className=good?"good":"";m.style.display=t?"block":"none";m.textContent=t||"";
+  if(sug){const b=document.createElement("button");b.textContent="Use suggested point";b.style.marginLeft="10px";b.onclick=()=>pick({x:sug[0],y:sug[1]});m.appendChild(b)}}
+async function pick(body){
+  const r=await post("/api/target",body);
+  if(r.ok){say(r.retargeted?"New target accepted: stopped, replanning from the observed pose.":"Target set.",true);setTimeout(()=>say(""),2500);if(S)S._sug=null}
+  else{say("Target rejected: "+(r.reason||r.msg||r.error||"unknown")+(r.suggestion?" Nearest point where the whole rover fits is marked on the map (not applied):":""),false,r.suggestion);if(S)S._sug=r.suggestion||null}}
+function rr(cx,cy,th,L,W){ctx.save();ctx.translate(cx,cy);ctx.rotate(-th);ctx.strokeRect(-L/2,-W/2,L,W);ctx.restore()}
+function draw(){
+  if(!S)return;const asp=S.calib.aspect||1.5;const h=Math.round(720/asp);if(cv.height!==h)cv.height=h;
+  ctx.clearRect(0,0,cv.width,cv.height);
+  if(img.complete&&img.naturalWidth)ctx.drawImage(img,0,0,cv.width,cv.height);else{ctx.fillStyle="#222";ctx.fillRect(0,0,cv.width,cv.height);ctx.fillStyle="#888";ctx.fillText("waiting for frame + boundary markers",20,30)}
+  const dc=S.depth_cells;ctx.fillStyle="rgba(248,81,73,.45)";
+  (dc.cells||[]).forEach(([c,r,v])=>{if(v>=0.5)ctx.fillRect(X(c/dc.cols),Y((r+1)/dc.rows),cv.width/dc.cols+1,cv.height/dc.rows+1)});
+  ctx.fillStyle="rgba(210,153,34,.40)";   // no usable depth (holes / never seen): NOT free, the planner treats it as blocked
+  (dc.unknown||[]).forEach(([c,r])=>ctx.fillRect(X(c/dc.cols),Y((r+1)/dc.rows),cv.width/dc.cols+1,cv.height/dc.rows+1));
+  if(S.mission){ctx.font="bold 13px sans-serif";S.mission.structures.forEach(x=>{ctx.fillStyle=x.status==="complete"?"#2ea043":(x.status==="unreachable"||x.status==="failed"?"#f85149":"#fff");ctx.fillText(x.label,X(x.x)-8,Y(x.y)-6)})}
+  ctx.fillStyle="rgba(210,153,34,.5)";ctx.strokeStyle="#d29922";ctx.lineWidth=2;
+  S.manual.forEach(r=>{ctx.fillRect(X(r[0]),Y(r[3]),X(r[2])-X(r[0]),Y(r[1])-Y(r[3]));ctx.strokeRect(X(r[0]),Y(r[3]),X(r[2])-X(r[0]),Y(r[1])-Y(r[3]))});
+  if(S.areas){ctx.lineWidth=2;ctx.setLineDash([6,4]);
+   S.areas.mark.forEach(r=>{ctx.fillStyle="rgba(46,160,67,.25)";ctx.strokeStyle="#2ea043";ctx.fillRect(X(r[0]),Y(r[3]),X(r[2])-X(r[0]),Y(r[1])-Y(r[3]));ctx.strokeRect(X(r[0]),Y(r[3]),X(r[2])-X(r[0]),Y(r[1])-Y(r[3]))});
+   S.areas.ignore.forEach(r=>{ctx.fillStyle="rgba(139,148,158,.35)";ctx.strokeStyle="#8b949e";ctx.fillRect(X(r[0]),Y(r[3]),X(r[2])-X(r[0]),Y(r[1])-Y(r[3]));ctx.strokeRect(X(r[0]),Y(r[3]),X(r[2])-X(r[0]),Y(r[1])-Y(r[3]));
+     ctx.beginPath();ctx.moveTo(X(r[0]),Y(r[3]));ctx.lineTo(X(r[2]),Y(r[1]));ctx.moveTo(X(r[0]),Y(r[1]));ctx.lineTo(X(r[2]),Y(r[3]));ctx.stroke()});
+   ctx.setLineDash([])}
+  if(drag&&drag.b){ctx.strokeStyle="#fff";ctx.setLineDash([5,4]);const a=drag.a,b=drag.b;ctx.strokeRect(X(Math.min(a[0],b[0])),Y(Math.max(a[1],b[1])),Math.abs(X(a[0])-X(b[0])),Math.abs(Y(a[1])-Y(b[1])));ctx.setLineDash([])}
+  const sw=S.sweep,hc=cv.height;
+  if(sw&&sw.L){ctx.strokeStyle="rgba(57,197,207,.45)";ctx.lineWidth=1;sw.rects.forEach(r=>rr(X(r[0]),Y(r[1]),r[2],sw.L*hc,sw.W*hc));
+    ctx.setLineDash([4,4]);ctx.strokeStyle="rgba(255,255,255,.5)";sw.turns.forEach(t=>{ctx.beginPath();ctx.arc(X(t[0]),Y(t[1]),sw.turn_r*hc,0,7);ctx.stroke()});ctx.setLineDash([])}
+  const P=S.path;if(P&&P.length>1){ctx.strokeStyle="#39c5cf";ctx.lineWidth=3;ctx.beginPath();P.forEach((p,i)=>i?ctx.lineTo(X(p[0]),Y(p[1])):ctx.moveTo(X(p[0]),Y(p[1])));ctx.stroke();ctx.fillStyle="#39c5cf";P.forEach(p=>{ctx.beginPath();ctx.arc(X(p[0]),Y(p[1]),4,0,7);ctx.fill()})}
+  if(S.target){const t=S.target,tr=(S.nav.arrive_tol_mm/(S.calib.height_mm||1e9))*hc;ctx.strokeStyle="#2ea043";ctx.lineWidth=2;ctx.beginPath();ctx.arc(X(t[0]),Y(t[1]),Math.max(tr,3),0,7);ctx.stroke();
+    ctx.beginPath();ctx.moveTo(X(t[0])-16,Y(t[1]));ctx.lineTo(X(t[0])+16,Y(t[1]));ctx.moveTo(X(t[0]),Y(t[1])-16);ctx.lineTo(X(t[0]),Y(t[1])+16);ctx.stroke()}
+  if(S._sug){ctx.strokeStyle="#d29922";ctx.lineWidth=3;ctx.setLineDash([5,4]);ctx.beginPath();ctx.arc(X(S._sug[0]),Y(S._sug[1]),12,0,7);ctx.stroke();ctx.setLineDash([])}
+  const p=S.pose;if(p){const cx=X(p.x),cy=Y(p.y);ctx.fillStyle="#58a6ff";ctx.strokeStyle="#58a6ff";ctx.beginPath();ctx.arc(cx,cy,6,0,7);ctx.fill();
+    if(p.theta!=null){const L=S.cfg.radius*hc*1.3;ctx.lineWidth=4;ctx.beginPath();ctx.moveTo(cx,cy);ctx.lineTo(cx+Math.cos(p.theta)*L,cy-Math.sin(p.theta)*L);ctx.stroke()}}
+}
+function chip(t,c){return `<span class="chip ${c}">${t}</span>`}
+function ui(){
+  const s=S,n=s.nav,c=s.calib;
+  $("badge").textContent=n.state.toUpperCase()+(n.cruising?" | CRUISE":"");$("badge").style.color={running:"#58a6ff",done:"#2ea043",failed:"#f85149",idle:"#e6edf3"}[n.state];
+  $("reason").textContent=n.reason||s.plan_error||s.plan_warning||"";
+  $("dry").textContent=s.dry_run?"DRY-RUN: no rover commands":(s.motion_enabled?"LIVE UGV link":"motion disabled");$("dry").className="chip "+(s.dry_run?"wn":(s.motion_enabled?"bad":""));
+  $("arm").checked=n.armed;$("arm").disabled=!s.motion_enabled;
+  $("start").disabled=!(n.armed&&s.target&&n.state!=="running"&&s.pose&&!s.plan_error);$("start").textContent=n.state==="running"?"RUNNING...":"START";
+  const hm=c.height_mm;$("prog").textContent=s.target?(n.dist==null?"target set":("distance "+(hm?Math.round(n.dist*hm)+" mm":n.dist.toFixed(3))+"  (arrive within "+n.arrive_tol_mm+" mm)")):"no target - click the map or the image";
+  $("stepn").textContent=n.step?("step "+n.step):"";
+  const ti=s.target_info;$("tinfo").textContent=ti?("target: "+ti.mm_from_left+" mm from left, "+ti.mm_from_bottom+" mm from bottom  (x="+ti.x.toFixed(3)+", y="+ti.y.toFixed(3)+")"):"";
+  if(s.target&&n.dist!=null){if(n.state!=="running"||!d0)d0=Math.max(n.dist,0.001);$("bar").firstElementChild.style.width=Math.max(0,Math.min(100,100*(1-n.dist/d0)))+"%"}
+  $("chips").innerHTML=chip("boundary "+(c.boundary_live?"live":(c.boundary_stored?"stored":"MISSING")),c.boundary_live?"ok":(c.boundary_stored?"wn":"bad"))
+   +chip("ground plane "+(c.plane?"ok":"not fit"),c.plane?"ok":"bad")+chip("aspect "+c.aspect+(c.aspect_measured?" (depth)":" (assumed)"),c.aspect_measured?"ok":"wn")
+   +chip("rover "+(s.pose?("tracked: "+(s.pose_source||"")):"LOST"),s.pose?"ok":"bad")+chip("frame "+(s.frame.age_s==null?"none":s.frame.age_s+"s old"),(s.frame.age_s!=null&&s.frame.age_s<3)?"ok":"bad")
+   +(s.warnings||[]).map(w=>chip(w,"wn")).join("")+(s.frame.err?chip("camera: "+s.frame.err,"bad"):"");
+  $("timing").innerHTML=chip("run time "+(n.run_s==null?"-":n.run_s+" s"),"")+chip("camera transfer "+(n.avg_fetch_ms||s.frame.fetch_ms)+" ms","")+chip("decision latency ~"+n.latency_s.toFixed(1)+" s","");
+  [["rw",s.cfg.rover_w_mm],["rl",s.cfg.rover_l_mm],["mm",s.cfg.margin_mm]].forEach(([i,v])=>{if(document.activeElement!==$(i))$(i).value=v==null?"":v});
+  $("clr").textContent="clearance radius "+s.cfg.radius.toFixed(3)+" + margin "+s.cfg.margin.toFixed(3)+" sandbox heights"+(hm?(" (sandbox height "+Math.round(hm)+" mm)"):"");
+  const ms=s.mission;if(ms){const run=ms.state==="running";
+   $("mstart").disabled=!(n.armed&&!run&&n.state!=="running"&&s.pose);$("mstart").textContent=run?"MISSION RUNNING...":"START MISSION (arm first)";
+   $("mstat").textContent="mission: "+ms.state+(ms.message?" - "+ms.message:"")+"  ("+ms.structures.length+" structure"+(ms.structures.length==1?"":"s")+")";
+   const act=ms.structures.find(x=>x.id===ms.active&&x.status==="collecting");
+   $("mcount").textContent=act&&ms.countdown!=null?(act.label+" - Collecting sensor data - "+Math.ceil(ms.countdown)+" s"):"";
+   const lrows=ms.structures.concat(ms.events||[]).map(x=>{const L=x.life,live=x.status==="collecting";
+     if(!L)return "<tr><td style='padding:3px 6px'><b>"+x.label+"</b></td><td style='padding:3px 6px;color:var(--mu)'>"+(live?"measuring...":"not measured yet")+"</td><td></td></tr>";
+     const p=Math.round(100*L.p),col=L.p>0.6?"#f85149":(L.p>0.2?"#d29922":"#8b949e");
+     return "<tr title='"+(L.reasons||[]).join("; ").replace(/'/g,"")+"'><td style='padding:3px 6px'><b>"+x.label+"</b></td><td style='padding:3px 6px;font-size:18px;font-weight:700;color:"+col+"'>P(life) "+p+"%</td><td style='padding:3px 6px;color:var(--mu)'>"+L.verdict+(L.final?"":" (live)")+"<br><span style='font-size:11px'>"+(L.reasons||[]).join("; ")+"</span></td></tr>"});
+   $("ltab").innerHTML=lrows.join("")||"<tr><td style='color:var(--mu)'>no structures yet</td></tr>";
+   $("lstat").textContent=act?(act.label+": sensor readings are being tagged "+act.label):"";
+   $("mlist").innerHTML=ms.structures.map(x=>"<div>"+x.label+": "+x.status_text+(x.reason?" ("+x.reason+")":"")+"</div>").join("");
+   if(document.activeElement!==$("mdw")&&run)$("mdw").value=ms.dwell_s;
+   const sc=ms.scene||{};
+   $("sstat").textContent=sc.baseline?("baseline scene #"+sc.baseline.seq+" @"+sc.baseline.rx_time+" | "+sc.count+" updates, every "+sc.period_s+" s, longest gap "+(sc.max_interval_s||0)+" s, map age "+(sc.map_age_s==null?"-":sc.map_age_s)+" s"+(sc.fatal?" | "+sc.fatal:"")):"no scene baseline yet (captured at START MISSION)";
+   $("elist").innerHTML=(ms.events||[]).map(e=>"<div><b>"+e.label+"</b> "+e.text+": "+e.status_text+(e.reason?" ("+e.reason+")":"")+" <span style='color:var(--mu)'>scene "+e.evidence.scene_seq+" @"+e.evidence.scene_rx_time+", "+e.evidence.support+(e.interrupted?", interrupted x"+e.interrupted:"")+"</span> <a href='/api/event.jpg?id="+e.id+"' target='_blank' style='color:var(--ac)'>evidence</a></div>").join("")||"<span style='color:var(--mu)'>none detected</span>";
+   $("supd").textContent=(sc.updates||[]).slice().reverse().map(u=>"#"+u.n+" seq "+u.seq+" rx "+(u.rx_time||"-")+(u.interval_s!=null?" (+"+u.interval_s+" s)":"")+" "+(u.valid?"ok":"INVALID "+(u.why||u.status||""))+((u.new_events||[]).length?" NEW "+u.new_events.join(","):"")).join("\n");}
+  $("log").textContent=s.log.join("\n");$("recn").textContent=s.recording?("recording "+s.recording.n+" frames"):"";$("rec").textContent=s.recording?"Stop recording":"Record depth+RGB";
+}
+async function poll(){
+  try{S=await (await fetch("/api/state")).json();
+   if(S.frame.seq!==imgSeq&&S.calib.boundary_stored){imgSeq=S.frame.seq;const im=new Image();im.onload=()=>{img=im;draw()};im.src="/api/view.jpg?"+imgSeq}
+   if(S.frame.seq!=null){const k=S.frame.seq+"|"+JSON.stringify(S.target)+"|"+S.path.length;if(k!==liveKey){liveKey=k;$("live").src="/api/live.jpg?"+Date.now()}
+     if(S.frame.seq!==camSeq){camSeq=S.frame.seq;$("cam").src="/api/camera.jpg?"+camSeq}}
+   ui();draw()}catch(e){}
+  setTimeout(poll,600)}
+poll();
+cv.addEventListener("pointerdown",e=>{if(!S)return;const p=toNorm(e),m=$("mode").value;
+  if(m==="target")pick({x:p[0],y:p[1]});
+  else if(m==="unarea"){const A={mark:S.areas.mark.slice(),ignore:S.areas.ignore.slice()};let hit=false;
+    for(const k of ["mark","ignore"]){const i=A[k].findIndex(r=>p[0]>=r[0]&&p[0]<=r[2]&&p[1]>=r[1]&&p[1]<=r[3]);if(i>=0){A[k].splice(i,1);hit=true;break}}
+    if(hit)post("/api/areas",A).then(r=>{if(r.error)say(r.error)})}
+  else if(m==="del"){const k=S.manual.findIndex(r=>p[0]>=r[0]&&p[0]<=r[2]&&p[1]>=r[1]&&p[1]<=r[3]);if(k>=0){const rs=S.manual.slice();rs.splice(k,1);post("/api/manual",{rects:rs})}}
+  else{drag={a:p,b:p};try{cv.setPointerCapture(e.pointerId)}catch(_){}}});
+cv.addEventListener("pointermove",e=>{if(drag){drag.b=toNorm(e);draw()}});
+cv.addEventListener("pointerup",e=>{if(!drag)return;const a=drag.a,b=toNorm(e);drag=null;
+  const r=[Math.min(a[0],b[0]),Math.min(a[1],b[1]),Math.max(a[0],b[0]),Math.max(a[1],b[1])];if(r[2]-r[0]>0.01&&r[3]-r[1]>0.01){const m=$("mode").value;
+   if(m==="mark"||m==="ignore"){const A={mark:S.areas.mark.slice(),ignore:S.areas.ignore.slice()};A[m].push(r);post("/api/areas",A).then(q=>{if(q.error)say(q.error)})}
+   else post("/api/manual",{rects:S.manual.concat([r])})}});
+$("live").addEventListener("click",e=>{if(!S||!S.frame.size)return;const r=e.target.getBoundingClientRect();
+  pick({px:(e.clientX-r.left)/r.width*S.frame.size[0],py:(e.clientY-r.top)/r.height*S.frame.size[1]})});
+$("arm").onchange=async e=>{const r=await post("/api/arm",{armed:e.target.checked});if(r.error){say(r.error);e.target.checked=false}};
+$("start").onclick=async()=>{const r=await post("/api/start");if(r.error||r.ok===false)say(r.error||r.msg)};
+$("mstart").onclick=async()=>{const r=await post("/api/mission/start",{dwell_s:+$("mdw").value,gap_mm:+$("mgap").value});if(r.error||r.ok===false)say(r.error||r.msg)};
+const STOP=()=>post("/api/stop");$("stop").onclick=STOP;
+$("restart").onclick=async()=>{if(!window.confirm("Restart the navigator? The rover stops and is disarmed; structures and P(life) results are cleared (calibration is kept)."))return;
+ const r=await post("/api/restart");if(r.error){say(r.error);return}say("restarting... the page reloads in a few seconds");
+ const t0=Date.now();const wait=async()=>{try{const q=await fetch("/api/state");if(q.ok&&Date.now()-t0>2500){location.reload();return}}catch(e){}setTimeout(wait,700)};setTimeout(wait,1500)};
+addEventListener("keydown",e=>{if(e.code==="Space"&&e.target.tagName!=="INPUT"){e.preventDefault();STOP()}});
+$("rw").onchange=$("rl").onchange=$("mm").onchange=()=>post("/api/config",{rover_w_mm:+$("rw").value,rover_l_mm:+$("rl").value,margin_mm:+$("mm").value});
+$("recal").onclick=()=>post("/api/recal_ground");$("clrmap").onclick=()=>post("/api/clear_map");
+$("rec").onclick=()=>post("/api/record",{on:!(S&&S.recording)});
+</script></body></html>

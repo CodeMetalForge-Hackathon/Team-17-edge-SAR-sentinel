@@ -3,6 +3,8 @@
     python dashboard.py                    # live, from the MQTT broker (run on the Pi or a laptop on the same network;
                                            #   set MQTT_HOST in config.py to the Pi's IP on the laptop)
     python dashboard.py --sim-snapshot     # run the simulated scenario and save dashboard_sim.png
+
+Press R in the dashboard window to reset the brain and the map between judges.
 """
 import math
 import sys
@@ -24,6 +26,10 @@ class Dashboard:
         bus.subscribe("forge/lidar/scan", lambda t, p: setattr(self, "scan", p["ranges_m"]))
         bus.subscribe("forge/event", lambda t, p: self.events.append(p))
         bus.subscribe("forge/action", self.on_action)
+        bus.subscribe("forge/control/reset", lambda t, p: self.clear())
+
+    def clear(self):
+        self.events, self.avoid, self.dispatches, self.log = [], [], [], ["(reset)"]
 
     def on_action(self, topic, a):
         self.avoid = a.get("avoid_zones", self.avoid)
@@ -104,7 +110,11 @@ if __name__ == "__main__":
         import matplotlib.pyplot as plt
         from matplotlib.animation import FuncAnimation
         from bus import make_bus
-        dash = Dashboard(make_bus(client_id=f"dash-{int(time.time())}"))
+        bus = make_bus(client_id=f"dash-{int(time.time())}")
+        dash = Dashboard(bus)
         fig, a1, a2 = make_figure()
+        fig.suptitle("press R to reset between judges", fontsize=8, x=0.99, ha="right")
+        fig.canvas.mpl_connect("key_press_event",
+                               lambda e: bus.publish("forge/control/reset", {"ts": time.time()}) if e.key in ("r", "R") else None)
         anim = FuncAnimation(fig, lambda _: dash.draw(a1, a2), interval=500, cache_frame_data=False)
         plt.show()
