@@ -32,6 +32,7 @@ class Perception:
         self.map_frames = 0
         self.allow_blob = True      # depth-blob pose when the rover marker is unreadable (labelled in the UI)
         self.last_pose = None
+        self._raw_hist = []
         self.dims_hist = []
         self.aabb_hist = []          # recent world-aligned blob extents (wx, wy) in mm
           # recent (L, W) rover extents in mm measured from depth
@@ -66,8 +67,16 @@ class Perception:
         json.dump([list(r) for r in self.manual], open(self._p("manual.json"), "w"))
 
     # --- obstacles for planning: depth-derived cells + manual footprints
-    def obstacle_rects(self, near=None):
-        return self.depth_map.rects(near=near, aspect=self.calib.aspect) + list(self.manual)
+    def obstacle_rects(self, near=None, self_r=0.13):
+        """Planner obstacles. Cells within self_r (square-frame units) of the rover are its own body/shadow, not obstacles."""
+        rects = self.depth_map.rects(near=near, aspect=self.calib.aspect)
+        if near is not None:
+            A = self.calib.aspect
+            rects = [r for r in rects if math.hypot((((r[0] + r[2]) / 2) - near[0]) * A, ((r[1] + r[3]) / 2) - near[1]) > self_r]
+        return rects + list(self.manual)
+
+    def reset_heading(self):
+        self._raw_hist = []
 
     def clear_depth_map(self):
         self.depth_map.clear()
@@ -111,6 +120,13 @@ class Perception:
         elif c.H is not None and c.plane is not None and self.allow_blob:
             near = (self.last_pose["x"], self.last_pose["y"]) if self.last_pose else None
             pose = V.blob_pose(frame.depth, c, near=near)
+            if pose is not None:
+                raw = V.pattern_heading(frame.bgr, frame.gray, c, frame.depth, pose["px"])
+                if raw is not None:
+                    now = time.time()
+                    self._raw_hist = [(t, r) for t, r in self._raw_hist if now - t < 2.5][-2:] + [(now, raw)]
+                    raw = math.atan2(sum(math.sin(r) for _, r in self._raw_hist), sum(math.cos(r) for _, r in self._raw_hist))
+                pose["theta_raw"] = raw
         if pose is not None:
             self.last_pose = pose
             if pose.get("source") == "depth-blob":

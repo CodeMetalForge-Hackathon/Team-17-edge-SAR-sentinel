@@ -334,9 +334,10 @@ def blob_pose(depth, calib, near=None, near_r=0.3, expect_mm=(200.0, 170.0)):
     quad = np.zeros((Hh, Ww), np.uint8)
     cv2.fillConvexPoly(quad, calib.corners.astype(np.int32), 1)
     quad = quad.astype(bool)
-    mid = valid & quad & (h > 40) & (h < 135)
-    tall = cv2.dilate((valid & (h >= 135)).astype(np.uint8), np.ones((9, 9), np.uint8)).astype(bool)
+    mid = valid & quad & (h > 35) & (h < 165)
+    tall = cv2.dilate((valid & (h >= 165)).astype(np.uint8), np.ones((9, 9), np.uint8)).astype(bool)
     mid = cv2.morphologyEx(mid.astype(np.uint8), cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    mid = cv2.morphologyEx(mid, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9)))   # merge split halves
     nlab, lab, stats, _ = cv2.connectedComponentsWithStats(mid, connectivity=8)
     best, best_score = None, 1e9
     for i in range(1, nlab):
@@ -354,11 +355,11 @@ def blob_pose(depth, calib, near=None, near_r=0.3, expect_mm=(200.0, 170.0)):
         nr = calib.to_norm(fpx)
         u = nr[:, 0] * calib.aspect * calib.height_mm
         v = nr[:, 1] * calib.height_mm
-        wx = float(np.percentile(u, 98) - np.percentile(u, 2))
-        wy = float(np.percentile(v, 98) - np.percentile(v, 2))
-        if not (90 <= wx <= 340 and 90 <= wy <= 340):
+        wx = float(np.percentile(u, 93) - np.percentile(u, 7)) * 1.15      # robust to flying-pixel outliers
+        wy = float(np.percentile(v, 93) - np.percentile(v, 7)) * 1.15
+        if not (80 <= wx <= 340 and 80 <= wy <= 340):
             continue
-        cxn, cyn = float(nr[:, 0].mean()), float(nr[:, 1].mean())
+        cxn, cyn = float(np.median(nr[:, 0])), float(np.median(nr[:, 1]))
         if near is not None:
             dist = math.hypot((cxn - near[0]) * calib.aspect, cyn - near[1])
             if dist > near_r:
@@ -371,3 +372,53 @@ def blob_pose(depth, calib, near=None, near_r=0.3, expect_mm=(200.0, 170.0)):
             best = {"x": cxn, "y": cyn, "theta": None, "source": "depth-blob", "dims_mm": [wx, wy],
                     "px": [float(px.mean()), float(py.mean())], "inside": True, "height_mm": float(np.median(hh))}
     return best
+
+
+def pattern_heading(bgr, gray, calib, depth, centre_px, half=34):
+    """Rover heading from the (too small to decode) marker: its bright pattern sits at the rover FRONT on the dark body,
+    so heading = direction from the body centre to the pattern centroid. Returns heading in the square frame
+    (radians, CCW, 0 = +x), or None. The marker/body offset is only a few pixels, so the caller anchors it with
+    the camera-measured direction of travel."""
+    if calib.H is None:
+        return None
+    H, W = gray.shape
+    cx, cy = int(round(centre_px[0])), int(round(centre_px[1]))
+    x0, x1, y0, y1 = max(0, cx - half), min(W, cx + half), max(0, cy - half), min(H, cy + half)
+    g = gray[y0:y1, x0:x1]
+    b = bgr[y0:y1, x0:x1].astype(np.int16)
+    dark = (g < 80).astype(np.uint8)
+    n, lab, st, ce = cv2.connectedComponentsWithStats(dark, connectivity=8)
+    if n < 2:
+        return None
+    k = 1 + int(np.argmax([st[i, cv2.CC_STAT_AREA] - 0.5 * np.hypot(*(ce[i] - [cx - x0, cy - y0])) * 10 for i in range(1, n)]))
+    if st[k, cv2.CC_STAT_AREA] < 400:
+        return None
+    body = (lab == k).astype(np.uint8)
+    cnts, _ = cv2.findContours(body, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    filled = np.zeros_like(body)
+    cv2.drawContours(filled, cnts, -1, 1, -1)
+    inner = cv2.erode(filled, np.ones((5, 5), np.uint8)).astype(bool)
+    bright = inner & (~body.astype(bool)) & (b.min(axis=2) > 105)
+    if bright.sum() < 6:
+        return None
+    # the marker pattern is the largest bright cluster; ignore stray highlights (LEDs, reflections)
+    grown = cv2.dilate(bright.astype(np.uint8), np.ones((3, 3), np.uint8), iterations=2)
+    nb, lb, sb, _ = cv2.connectedComponentsWithStats(grown, connectivity=8)
+    if nb < 2:
+        return None
+    kb = 1 + int(np.argmax(sb[1:, cv2.CC_STAT_AREA]))
+    bright = bright & (lb == kb)
+    by, bx = np.nonzero(bright)
+    if len(by) < 4:
+        return None
+    m = np.array([bx.mean() + x0, by.mean() + y0])
+    M = cv2.moments(filled)
+    c = np.array([M["m10"] / M["m00"] + x0, M["m01"] / M["m00"] + y0])
+    if np.hypot(*(m - c)) < 2.0:
+        return None
+    pts = np.array([c, m])
+    if depth is not None and calib.plane is not None and calib.K is not None:
+        pts = foot_px(pts, depth, calib.K, calib.plane)
+    a, bq = calib.to_norm(pts)
+    du, dv = (bq[0] - a[0]) * calib.aspect, bq[1] - a[1]
+    return float(math.atan2(dv, du))

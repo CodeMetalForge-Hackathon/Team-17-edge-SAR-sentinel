@@ -28,13 +28,19 @@ class UgvLink:
             self.sent.append(msg)
             return {"T": 1001, "y": 0.0, "L": 0, "R": 0, "v": 11.5}
         q = urllib.parse.quote(json.dumps(msg, separators=(",", ":")))
-        try:
-            c = http.client.HTTPConnection(self.host, 80, timeout=timeout, source_address=(self.local_ip, 0))
-            c.request("GET", "/js?json=" + q)
-            body = c.getresponse().read().decode(errors="ignore")
-            c.close()
-        except OSError as e:
-            raise UgvCommError("http %s: %s" % (msg, e))
+        err = None
+        for attempt in range(2):                      # the ESP32 occasionally drops a connection: retry once
+            try:
+                c = http.client.HTTPConnection(self.host, 80, timeout=max(timeout, 0.5), source_address=(self.local_ip, 0))
+                c.request("GET", "/js?json=" + q)
+                body = c.getresponse().read().decode(errors="ignore")
+                c.close()
+                err = None
+                break
+            except OSError as e:
+                err = e
+        if err is not None:
+            raise UgvCommError("http %s: %s" % (msg, err))
         try:
             return json.loads(body.strip().splitlines()[0]) if body.strip() else {}
         except ValueError:
@@ -50,9 +56,10 @@ class UgvLink:
                 time.sleep(0.05)
         return ok
 
-    def move(self, cmd, dur):
+    def move(self, cmd, dur, speed=None):
         dur = min(float(dur), MAX_BURST_S)
-        lr = {"F": (self.speed, self.speed), "B": (-self.speed, -self.speed),
+        s = self.speed if speed is None else min(float(speed), 0.6)
+        lr = {"F": (s, s), "B": (-s, -s),
               "Q": (-self.turn, self.turn), "E": (self.turn, -self.turn)}.get(cmd)
         if lr is None:
             raise UgvCommError("command %r not supported by a differential-drive rover" % cmd)
@@ -73,6 +80,35 @@ class UgvLink:
             raise
         if not self.stop():
             raise UgvCommError("STOP could not be confirmed after the burst")
+
+    def turn_by(self, cmd, target_rad, max_s=1.4):
+        """In-place turn with IMU feedback: keep turning until |yaw change| reaches the target (sign-agnostic, so it
+        works whichever way the IMU counts), then STOP. Aborts on a yaw glitch. Returns the measured |yaw change| (rad)."""
+        import math
+        lr = {"Q": (-self.turn, self.turn), "E": (self.turn, -self.turn)}[cmd]
+        y0 = self.yaw_deg()
+        if y0 is None:
+            raise UgvCommError("no IMU yaw")
+        wrap = lambda a: (a + 180.0) % 360.0 - 180.0
+        t_end, got, last = time.time() + max_s, 0.0, y0
+        try:
+            while time.time() < t_end:
+                self._get({"T": 1, "L": lr[0], "R": lr[1]}, timeout=0.3)
+                y = self._get({"T": 130}, timeout=0.3).get("y")
+                if y is None:
+                    continue
+                if abs(wrap(y - last)) > 100.0:           # impossible in ~0.1 s: IMU glitch, stop rather than trust it
+                    break
+                last = y
+                got = abs(math.radians(wrap(y - y0)))
+                if got >= target_rad:
+                    break
+        except UgvCommError:
+            self.stop(5)
+            raise
+        if not self.stop():
+            raise UgvCommError("STOP could not be confirmed after the turn")
+        return got
 
     def feedback(self):
         fb = self._get({"T": 130}, timeout=0.6)
