@@ -40,6 +40,12 @@ python dashboard.py                                      # or on a laptop with M
 
 Then retrain on real data: `python node_bridge.py n1 --log` for ~5 min of normal activity, then `python anomaly.py train`.
 
+## WAVE ROVER keyboard control
+
+A separate Wi-Fi controller provides browser-based hold-to-move WASD, release-to-stop, Space stop/disarm, and a Pi-side heartbeat timeout at power 0.30. It uses the existing rover HTTP protocol and starts in dry-run mode. The browser connects through an SSH tunnel; ordinary SSH terminal input does not reliably report key release.
+
+See [the rover setup and validation guide](rover/README.md) for installation, controls, live testing, and failure limits. It does not change the existing `rover_wifi.py` or Wi-Fi/Tailscale settings. No rover-side watchdog is assumed.
+
 ## Owners
 
 | Module | Files | Owner |
