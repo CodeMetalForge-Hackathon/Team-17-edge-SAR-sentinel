@@ -35,3 +35,21 @@ Per-photo workflow: Reload image -> check handles -> Confirm boundary alignment 
 ## Footprint planning (18x12 default)
 
 Draw obstacle/rover rectangles in the flattened view (modes "Draw obstacle footprint", "Draw rover footprint"); click a rectangle to select, drag a corner to resize, Delete key or button removes it. Rectangles are stored in normalized coordinates (scenario version 2), so changing the grid only recomputes occupied cells. Planning inflates obstacles by the rover footprint's enclosing-circle radius plus the extra margin and keeps the rover centre that far from the sandbox edge (whole-cell test, so conservative; finer grid = narrower gaps allowed). Start/target footprints that overlap an obstacle are rejected; the margin is never lowered automatically. All sizes are normalized, not metres. Replacing the photo clears the rover pose and requires "Confirm boundary alignment" and "Confirm footprints" again. Old 6x4 scenarios are not reused (backups in `backups/`).
+
+## Automatic rubble detection (Dhrubo branch)
+
+Obstacle footprints no longer have to be drawn by hand. `detect.py` compares the current photo with a saved BEFORE photo of the empty sandbox, both flattened with the same 4 corners, and turns every changed blob into an obstacle footprint in the viewer's normalized frame (BL = (0,0), y up).
+
+Needs OpenCV on the machine that runs `serve.py`: `sudo apt install -y python3-opencv` (system Python) or `pip install opencv-python-headless numpy`.
+
+Per-run workflow:
+1. Photograph the **empty** sandbox (rover parked at its start is fine). Reload image -> Confirm boundary alignment -> **Save as BEFORE**.
+2. Drop the rubble. Take a new photo -> Reload image -> Confirm boundary alignment.
+3. Draw the rover footprint first if the rover moved since BEFORE (it is excluded from detection, so it is never called rubble).
+4. **Detect rubble**. Detected footprints are drawn dashed and listed with the cells they cover. Open "detection view" (`/detect_debug.png`) to see the change mask and boxes on the flattened photo. Fix any footprint by hand (drag a corner, or select + Delete), then Confirm footprints and plan as before.
+
+Command-line check without the page:
+
+    python detect.py --before before.jpg --after after.jpg --corners corners.json --cols 6 --rows 4 --debug out.png
+
+Tuning (top of `detect.py`): `DIFF_THRESH` (raise if shadows or glare show up as rubble), `MIN_AREA_FRAC` (raise to drop small specks), `L_WEIGHT` (lower to ignore brightness changes more). Keep the camera, focus and exposure fixed between BEFORE and the detection photo, and retake BEFORE before each run.

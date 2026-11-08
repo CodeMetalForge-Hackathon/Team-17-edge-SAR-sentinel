@@ -27,6 +27,9 @@
   <label>mode <select id="mode"><option value="inspect">Inspect coordinate</option><option value="obst">Draw obstacle footprint</option><option value="roverbox">Draw rover footprint</option><option value="heading">Set rover forward direction</option><option value="target">Set target cell</option></select></label>
   <button id="delfp">Delete selected footprint</button>
   <button id="reload">Reload image</button>
+  <button id="setbefore" title="Use the current photo of the EMPTY sandbox as the reference">Save as BEFORE</button>
+  <button id="detect" title="Compare the current photo with BEFORE and turn changes into obstacle footprints">Detect rubble</button>
+  <a id="dbg" href="/detect_debug.png" target="_blank" style="color:#9cf">detection view</a>
   <button id="confirm">Confirm boundary alignment</button>
   <button id="confirmfp">Confirm footprints</button>
   <button id="clearsc">Clear scenario</button>
@@ -66,7 +69,7 @@
   number = row bottom→top (A1 is bottom-left). All coordinates, footprint sizes and margins are dimensionless fractions of the boundary, NOT metres.
   Lens distortion is NOT corrected, so the mapping is only approximately straight-line accurate, worse toward image edges. The sandbox's real aspect ratio is unknown, so a "radius" in
   normalized units is only an approximation of a circle. Planning inflates every obstacle by the rover footprint's enclosing-circle radius plus the extra margin and keeps the rover centre
-  that far from the sandbox edge (whole-cell test: conservative, finer grids allow narrower gaps). Footprints are hand-drawn, not detected. This is a static route preview: not a
+  that far from the sandbox edge (whole-cell test: conservative, finer grids allow narrower gaps). Obstacle footprints come from Detect rubble (current photo vs the saved BEFORE photo; detected ones are drawn dashed) and can be corrected by hand. This is a static route preview: not a
   guarantee of physical clearance, not a motor command. Rover forward direction and motion conventions are UNVERIFIED until tested on hardware. Each move needs a fresh photo and re-set pose.
 </div>
 <script src="/homography.js"></script>
@@ -301,7 +304,7 @@ function draw(live) {
       occ.forEach(k => { const [c, r] = k.split(",").map(Number); cellQuad(ctx, c, r, f); });
       obstacles.forEach((r, i) => { // obstacle footprints
         const on = sel && sel.kind === "obst" && sel.i === i;
-        ctx.lineWidth = lw * (on ? 1.6 : 1.1); ctx.strokeStyle = on ? "#ffffff" : "#ff3b3b"; poly(ctx, rectPts(r), f); ctx.stroke();
+        ctx.lineWidth = lw * (on ? 1.6 : 1.1); ctx.strokeStyle = on ? "#ffffff" : "#ff3b3b"; ctx.setLineDash(r.auto ? [8, 5] : []); poly(ctx, rectPts(r), f); ctx.stroke(); ctx.setLineDash([]);
         tag(ctx, f((r.x0 + r.x1) / 2, (r.y0 + r.y1) / 2), "#" + (i + 1), "#ffb0b0", sz * 0.9);
       });
       if (route && route.length > 1) {
@@ -472,6 +475,29 @@ $("save").onclick = async () => {
 $("reload").onclick = () => reloadImage().catch(e => setStatus(false, "reload error: " + e));
 $("confirm").onclick = () => { if (err) { $("route").textContent = "Cannot confirm: " + err; return; } confirmed = true; replan(); draw(); };
 $("confirmfp").onclick = () => { fconfirmed = true; replan(); draw(); };
+
+// ---- automatic rubble detection (server runs detect.py: BEFORE photo vs current photo) ----
+function note(msg) { $("route").textContent = msg + "\n" + $("route").textContent; }
+$("setbefore").onclick = async () => {
+  if (!img) return;
+  const [c, j] = await api("/api/before", {});
+  note(c === 200 ? "BEFORE saved from the current photo. Add the rubble, take a new photo, Reload image, confirm the boundary, then Detect rubble."
+                 : "Save as BEFORE failed: " + (j.error || c));
+};
+$("detect").onclick = async () => {
+  if (err || !confirmed) { note("Confirm the boundary alignment on this photo before detecting."); return; }
+  const exclude = rover && rover.rect ? [rover.rect] : [];  // never call the rover rubble
+  $("detect").disabled = true;
+  try {
+    const [c, j] = await api("/api/detect", { corners, exclude, cols: cols(), rows: rows(), image_mtime: imgMtimeS });
+    if (c !== 200) { note("Detect rubble failed: " + (j.error || c)); return; }
+    const manual = obstacles.filter(o => !o.auto);
+    obstacles = manual.concat(j.obstacles.map(o => ({ x0: o.x0, y0: o.y0, x1: o.x1, y1: o.y1, auto: true })));
+    sel = null; fconfirmed = false; replan(); draw();
+    note("Detected " + j.obstacles.length + " rubble footprint(s) covering " + (j.blocked.length ? j.blocked.join(" ") : "no cells") +
+         ". Check them against the photo (detection view), fix any by hand, then Confirm footprints.");
+  } finally { $("detect").disabled = false; }
+};
 
 // ---- manual rover control (server enforces: --enable-motion, armed, fresh photo, STOP always allowed) ----
 async function api(path, body) {

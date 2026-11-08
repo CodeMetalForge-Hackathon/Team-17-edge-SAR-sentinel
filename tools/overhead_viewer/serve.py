@@ -23,6 +23,55 @@ def corners_path(image):
     return os.path.join(HERE, "corners_" + os.path.splitext(base)[0] + ".json")
 
 
+# ---- automatic rubble detection (before photo vs current photo), see detect.py ----
+DEBUG_PNG = os.path.join(HERE, "detect_debug.png")
+
+
+def before_path(image):
+    """The saved BEFORE photo for this image path (kept next to this file, one per photo name)."""
+    return os.path.join(HERE, "before_" + os.path.basename(image))
+
+
+def save_before(image):
+    import shutil
+    if not os.path.exists(image):
+        return 404, {"error": "no current image on disk"}
+    shutil.copyfile(image, before_path(image))
+    return 200, {"before": os.path.basename(before_path(image)), "before_mtime": os.stat(before_path(image)).st_mtime}
+
+
+def run_detect(image, d):
+    """Body: {corners:[[x,y]*4] BL,BR,TR,TL, exclude:[{x0,y0,x1,y1}], cols, rows, image_mtime}."""
+    try:
+        import cv2
+        import detect as det
+    except ImportError as e:
+        return 500, {"error": "detection needs OpenCV on this machine (sudo apt install python3-opencv): %s" % e}
+    bp = before_path(image)
+    if not os.path.exists(bp):
+        return 409, {"error": "no BEFORE photo yet: photograph the empty sandbox, Reload image, press Save as BEFORE"}
+    try:
+        m = os.stat(image).st_mtime
+    except OSError as e:
+        return 404, {"error": str(e)}
+    if "image_mtime" in d and abs(float(d["image_mtime"]) - m) > 1e-3:
+        return 409, {"error": "a newer photo is on disk: press Reload image first"}
+    corners = d.get("corners")
+    if not (isinstance(corners, list) and len(corners) == 4):
+        return 400, {"error": "need 4 corners"}
+    before, after = cv2.imread(bp), cv2.imread(image)
+    if before is None or after is None:
+        return 500, {"error": "could not read the before/current photo"}
+    if before.shape != after.shape:
+        return 409, {"error": "BEFORE photo has a different size: save a new BEFORE with the same camera settings"}
+    cols, rows = int(d.get("cols", 6)), int(d.get("rows", 4))
+    exclude = [r for r in d.get("exclude", []) if isinstance(r, dict) and all(k in r for k in ("x0", "y0", "x1", "y1"))]
+    obstacles, mask, _, after_top = det.detect(before, after, corners, exclude)
+    cv2.imwrite(DEBUG_PNG, det.debug_image(after_top, mask, obstacles, cols, rows))
+    return 200, {"obstacles": obstacles, "blocked": det.blocked_cells(obstacles, cols, rows),
+                 "before_age_s": round(m - os.stat(bp).st_mtime, 1)}
+
+
 class Rover:
     """Gatekeeper between the web UI and RoverLink. Motion is OFF unless the server was started with
     --enable-motion AND the operator arms it in the UI. Every move requires a fresh observation: the
@@ -124,6 +173,10 @@ def make_handler(image_path, rover):
                 self.end_headers()
                 self.wfile.write(data)
                 return
+            if path == "/detect_debug.png":
+                if not os.path.exists(DEBUG_PNG):
+                    return self._send(404, b"no detection run yet", "text/plain")
+                return self._send(200, open(DEBUG_PNG, "rb").read(), "image/png")
             if path == "/api/state":
                 return self._send(200, json.dumps(rover.state()).encode(), "application/json")
             if path == "/corners":
@@ -140,7 +193,7 @@ def make_handler(image_path, rover):
                     return self._send(403, b"forbidden", "text/plain")
                 n = int(self.headers.get("Content-Length", 0))
                 try:
-                    d = json.loads(self.rfile.read(min(n, 1024)) or b"{}")
+                    d = json.loads(self.rfile.read(min(n, 8192)) or b"{}")
                 except ValueError:
                     return self._send(400, b"bad json", "text/plain")
                 if path == "/api/stop":
@@ -149,6 +202,10 @@ def make_handler(image_path, rover):
                     code, body = rover.arm(d.get("armed"))
                 elif path == "/api/move":
                     code, body = rover.move(d)
+                elif path == "/api/before":
+                    code, body = save_before(image_path)
+                elif path == "/api/detect":
+                    code, body = run_detect(image_path, d)
                 else:
                     code, body = 404, {"error": "not found"}
                 return self._send(code, json.dumps(body).encode(), "application/json")
