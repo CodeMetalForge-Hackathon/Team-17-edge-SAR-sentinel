@@ -48,14 +48,16 @@ class BlobPilot:
         self.target = None
         self.path, self.blocked, self.obstacles = None, set(), []
         self.trail = []
+        self.photo = None
 
     # ------------------------------------------------------------------ seeing
-    def look(self, expect=None):
+    def look(self, expect=None, lenient=False):
         """Photo -> sandbox -> objects; updates rover position if it is already known (searched for near
         `expect`, where the last burst should have taken it, else near where it was). -> objects."""
         if self.should_stop():
             raise Stop()
         photo = self.camera.capture()
+        self.photo = photo
         markers = find_markers(photo)
         corners = outer_corners(markers)
         if corners is not None:
@@ -69,9 +71,13 @@ class BlobPilot:
             if r is None and expect:
                 r = self._nearest(self.rover_xy)
             if r is None:
-                raise RuntimeError("lost the rover: no object within %d cm of where it was" % (TRACK_RADIUS_M * 100))
-            self.rover_xy = (r["cx"], r["cy"])
-            self.trail.append(self.rover_xy)
+                if not lenient:
+                    raise RuntimeError("lost the rover: no object within %d cm of where it was" % (TRACK_RADIUS_M * 100))
+                self.rover_xy = None  # moved by hand / out of view: will be found again (click it, or its first move)
+                self.log("rover not where it was: click it on the map, or GO finds it by its first move")
+            else:
+                self.rover_xy = (r["cx"], r["cy"])
+                self.trail.append(self.rover_xy)
         self._update_plan()
         return self.objects
 

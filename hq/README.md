@@ -1,11 +1,26 @@
 # HQ: overhead route + autonomous rover
 
+## The app (end to end)
+```
+# on the Zero (once per boot): instant photos from a camera that stays open and focused
+python3 ~/camserver.py                       # zero/camserver.py from this repo; serves :8090/photo.jpg
+
+# on the khoj Pi (HQ), with wlan1 on the rover's network at 192.168.4.2 (rover/REFLASH.md)
+cd ~/forge-dhrubo && python3 hq/app.py --enable-motion
+```
+Open **http://100.119.240.31:8080** (laptop or iPad on Tailscale). **Get photo**, then click a square = target (or switch to "Click = rover is here" and click the rover), then **GO**. HQ takes a new photo after every burst and drives until it arrives. **STOP** (button, Space, Esc) stops at once.
+`python3 hq/app.py --sim` runs the same page on a simulated camera and rover (testing, or the demo fallback).
+While `camserver.py` runs, it owns the camera: `rpicam-still` on the Zero will fail until it is stopped.
+
+
 Runs on the HQ Pi. Takes the overhead photo of the white board (4 ArUco corner markers), finds every object on it, works out which one is the rover (the one that moves), plans a route to the target square around the rest, and drives the RoverC-Pro there in short bursts, checking a new photo after each burst.
 
 No marker is needed on the rover. A corner marker whose white margin is covered (cardboard touching it) is still found.
 
 ## Files
-- `run.py`: the command to use (plan only, or `--go` to drive).
+- `app.py` + `app.html`: the HQ web app (Get photo, target, GO, STOP).
+- `run.py`: command-line version (plan only, or `--go` to drive).
+- `follow.py`: drive the planned route on timing only, no photos while driving.
 - `blob_pilot.py`: marker-free rover tracking, self-calibration, and the drive loop.
 - `vision.py`: markers, flattening, objects on the white board, before/after rubble.
 - `planner.py`: grid squares (A1 = bottom-left as seen in the photo) and A* with clearance for the rover's size.

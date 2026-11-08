@@ -38,6 +38,32 @@ class ZeroCamera:
         return img
 
 
+class HttpCamera:
+    """Instant photo from the Zero's camera server (zero/camserver.py): GET <url> returns the current frame.
+    Also saves each photo to save_path (if given) so other tools can use it."""
+
+    def __init__(self, url, save_path=None, timeout_s=15):
+        self.url, self.save_path, self.timeout = url, save_path, timeout_s
+
+    def capture(self):
+        import urllib.request
+        import numpy as np
+        try:
+            with urllib.request.urlopen(self.url, timeout=self.timeout) as r:
+                data = r.read()
+        except Exception as e:
+            raise RuntimeError("camera: cannot reach %s (%s). Is camserver.py running on the Zero?" % (self.url, e))
+        img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+        if img is None:
+            raise RuntimeError("camera: got a reply that is not a JPEG")
+        if self.save_path:
+            tmp = self.save_path + ".part"
+            with open(tmp, "wb") as f:
+                f.write(data)
+            os.replace(tmp, self.save_path)
+        return img
+
+
 class WatchedFileCamera:
     """Uses the photos someone else puts at path (e.g. the Zero pipeline writing /home/khoj/overhead_latest.jpg).
     capture() returns the NEXT photo: newer than the last one used. If capture_cmd is given it is run first to
