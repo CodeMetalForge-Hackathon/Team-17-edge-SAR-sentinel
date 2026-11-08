@@ -387,7 +387,9 @@ def run_live(path, base, pub, cfg=CFG, poll_s=0.2):
             for c in COLS_NUM:
                 cur[c].append(float(r[c]))
             el = cur["ts"][-1] - cur["ts"][0]
-            if el - last_print >= 1.0 and el > cfg["settle_s"] + 1.0:
+            # publish (and latch) only once the full evidence window is in: before settle + min_window the absence and CO2
+            # evidence is not counted yet, so an early score would just be the prior (or inflated) and would stick as the peak
+            if el - last_print >= 1.0 and el >= cfg["settle_s"] + cfg["min_window_s"]:
                 last_print = el
                 p, reasons, _ = score_stop(_arr(cur), base, cfg)
                 if cur["best"] is None or p > cur["best"][0]:

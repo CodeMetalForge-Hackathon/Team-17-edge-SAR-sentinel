@@ -83,6 +83,25 @@ class SensorTagger:
                 pass
             self.current, self._res, self._res_mtime = None, {}, None
 
+    def status(self, node="n1"):
+        """UNO Q feed health for the console: age of the newest reading and an approximate rate (from the log's growth)."""
+        path = os.path.join(self.dir, node + ".jsonl")
+        try:
+            st = os.stat(path)
+        except OSError:
+            return {"ok": False, "age_s": None, "rate_hz": None, "tag": self.current}
+        now = time.time()
+        rate = None
+        prev = getattr(self, "_st_prev", None)
+        if prev and now - prev[0] >= 1.0:
+            rate = max(0.0, (st.st_size - prev[1]) / (now - prev[0]) / 190.0)     # ~190 bytes per JSON reading
+            self._st_prev, self._rate = (now, st.st_size), rate
+        elif prev is None:
+            self._st_prev = (now, st.st_size)
+        rate = getattr(self, "_rate", None)
+        return {"ok": True, "age_s": round(now - st.st_mtime, 1), "rate_hz": None if rate is None else round(rate, 1),
+                "tag": self.current}
+
     def results(self):
         """{label: {p, verdict, reasons, final, ts}} as written by model/survivor.py (cached on mtime)."""
         try:

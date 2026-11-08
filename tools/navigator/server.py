@@ -174,6 +174,7 @@ class App:
             "target": t, "target_info": tinfo,
             "path": path, "sweep": self.sweep(path),
             "mission": self._mission_state(),
+            "sensors": self.sensors.status() if self.sensors is not None else None,
             "plan_error": (res or {}).get("error", ""),
             "plan_warning": ("" if n.state == "running" or not res or res.get("error") else
                              (lambda g: ("route drawn, but the guard would stop its first move: " + g + " (the run would stop, refresh the map "
@@ -535,6 +536,8 @@ def make_handler(app):
 
         def do_GET(self):
             p = self.path.split("?")[0]
+            if p in ("/console", "/console.html"):           # Team Lifeline HQ console (same API as the page below)
+                return self._send(200, open(os.path.join(HERE, "console.html"), "rb").read(), "text/html; charset=utf-8")
             if p in ("/", "/index.html"):
                 return self._send(200, open(os.path.join(HERE, "nav.html"), "rb").read(), "text/html; charset=utf-8")
             if p == "/api/state":

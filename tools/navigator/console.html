@@ -1,0 +1,447 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>LIFELINE // HQ CONSOLE</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'%3E%3Crect width='48' height='48' rx='8' fill='%230a0d0b'/%3E%3Ccircle cx='24' cy='24' r='19' fill='none' stroke='%236f8556' stroke-width='3'/%3E%3Cpath d='M6 26 H16 L19 18 L23 33 L27 12 L31 30 L33 26 H42' fill='none' stroke='%239bb07a' stroke-width='3.5' stroke-linejoin='round' stroke-linecap='round'/%3E%3C/svg%3E">
+<style>
+:root{
+ --bg:#0a0d0b;--pn:rgba(15,19,16,.88);--pn2:rgba(22,28,23,.92);--ln:#27322a;--ln2:#36443a;
+ --tx:#d5dccf;--mu:#7f8c7c;--dim:#56624f;--ol:#9bb07a;--ol2:#6f8556;
+ --ok:#5fae6a;--wn:#d9a441;--bad:#e5484d;--cy:#4fb3bf;
+ --hd:"Bahnschrift SemiCondensed","Bahnschrift","DIN Condensed","Roboto Condensed","Arial Narrow",sans-serif;
+ --mono:"Cascadia Mono","Consolas","SF Mono","Menlo",ui-monospace,monospace;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--tx);font:14px/1.35 var(--hd)}
+body.red{filter:grayscale(1) sepia(1) saturate(7) hue-rotate(-48deg) brightness(.62) contrast(1.1)}
+body.red canvas#cv,body.red img.feed{filter:brightness(.55)}
+#topo{position:fixed;inset:0;width:100vw;height:100vh;z-index:0;pointer-events:none}
+.app{position:relative;z-index:1;min-height:100vh;display:flex;flex-direction:column}
+/* exercise banner + header */
+.banner{background:#3a2f12;color:#e8c46a;text-align:center;font:600 11px var(--mono);letter-spacing:.42em;padding:3px 0;border-bottom:1px solid #5a4a1c}
+header{display:flex;align-items:center;gap:18px;padding:12px 20px;border-bottom:1px solid var(--ln);background:linear-gradient(180deg,rgba(18,23,19,.95),rgba(10,13,11,.85))}
+.brand{display:flex;align-items:center;gap:12px}
+.brand svg{width:42px;height:42px}
+.brand h1{margin:0;font:700 24px var(--hd);letter-spacing:.22em;color:#e9eee3}
+.brand .sub{font:500 11px var(--mono);letter-spacing:.22em;color:var(--ol)}
+.hdr-r{margin-left:auto;display:flex;align-items:center;gap:22px}
+.clk{text-align:right}.clk b{display:block;font:600 20px var(--mono);color:#e9eee3;letter-spacing:.06em}.clk span{font:500 10px var(--mono);color:var(--mu);letter-spacing:.2em}
+.tbtn{background:transparent;border:1px solid var(--ln2);color:var(--mu);font:600 11px var(--mono);letter-spacing:.18em;padding:7px 10px;border-radius:3px;cursor:pointer}
+.tbtn:hover{color:var(--tx);border-color:var(--ol2)}
+/* status strip */
+.status{display:flex;flex-wrap:wrap;gap:8px;padding:8px 20px;border-bottom:1px solid var(--ln);background:rgba(10,13,11,.7)}
+.lt{display:flex;align-items:center;gap:8px;border:1px solid var(--ln);background:var(--pn);padding:5px 10px;border-radius:3px;font:600 11px var(--mono);letter-spacing:.12em;color:var(--mu)}
+.lt i{width:9px;height:9px;border-radius:50%;background:var(--dim);box-shadow:0 0 0 2px rgba(0,0,0,.4)}
+.lt.ok i{background:var(--ok);box-shadow:0 0 8px rgba(95,174,106,.7)}.lt.wn i{background:var(--wn);box-shadow:0 0 8px rgba(217,164,65,.7)}.lt.bad i{background:var(--bad);box-shadow:0 0 8px rgba(229,72,77,.8);animation:blink 1s steps(2) infinite}
+.lt b{color:var(--tx);font-weight:600}
+@keyframes blink{50%{opacity:.35}}
+/* layout */
+main{flex:1;display:grid;grid-template-columns:minmax(0,1fr) 400px;gap:14px;padding:14px 20px 20px;max-width:1600px;width:100%;margin:0 auto}
+@media(max-width:1100px){main{grid-template-columns:1fr}}
+.card{background:var(--pn);border:1px solid var(--ln);border-radius:4px;padding:12px 14px;margin-bottom:14px;position:relative}
+.card::before{content:"";position:absolute;left:-1px;top:-1px;width:14px;height:14px;border-left:2px solid var(--ol2);border-top:2px solid var(--ol2)}
+.card::after{content:"";position:absolute;right:-1px;bottom:-1px;width:14px;height:14px;border-right:2px solid var(--ol2);border-bottom:2px solid var(--ol2)}
+.ch{display:flex;align-items:center;gap:10px;margin:0 0 10px}
+.ch h2{margin:0;font:600 13px var(--hd);letter-spacing:.24em;color:var(--ol);text-transform:uppercase}
+.ch .meta{margin-left:auto;font:500 11px var(--mono);color:var(--mu);letter-spacing:.08em}
+canvas#cv,img.feed{width:100%;display:block;border:1px solid var(--ln2);border-radius:2px;background:#050605;cursor:crosshair;touch-action:none}
+/* tools */
+.tools{display:flex;flex-wrap:wrap;gap:0;margin-bottom:10px;border:1px solid var(--ln2);border-radius:3px;overflow:hidden;width:max-content;max-width:100%}
+.tools button{background:transparent;border:0;border-right:1px solid var(--ln2);color:var(--mu);font:600 11px var(--mono);letter-spacing:.12em;padding:7px 11px;cursor:pointer}
+.tools button:last-child{border-right:0}
+.tools button.on{background:var(--ol2);color:#0b0e0b}
+.legend{display:flex;flex-wrap:wrap;gap:14px;margin-top:8px;font:500 11px var(--mono);color:var(--mu);letter-spacing:.06em}
+.legend span::before{content:"";display:inline-block;width:10px;height:10px;margin-right:6px;vertical-align:-1px;background:var(--c);border:1px solid var(--b,var(--c))}
+#msg{display:none;margin:0 0 10px;padding:8px 12px;border-left:3px solid var(--bad);background:rgba(229,72,77,.12);font:500 13px var(--mono)}
+#msg.good{border-color:var(--ok);background:rgba(95,174,106,.12)}
+#msg button{margin-left:10px}
+/* control */
+.state{display:flex;align-items:baseline;gap:12px}
+.state b{font:700 26px var(--hd);letter-spacing:.14em}
+.state span{font:500 11px var(--mono);color:var(--mu);letter-spacing:.1em}
+.why{min-height:18px;margin:6px 0 8px;font:500 12px var(--mono);color:var(--mu)}
+.why a{color:var(--ol);cursor:pointer;text-decoration:underline dotted}
+.bar{height:6px;background:#1a211b;border:1px solid var(--ln);margin:6px 0}.bar i{display:block;height:100%;width:0;background:var(--cy)}
+.kv{display:flex;justify-content:space-between;font:500 12px var(--mono);color:var(--mu)}
+.btn{display:block;width:100%;background:#1c241d;color:var(--tx);border:1px solid var(--ln2);border-radius:3px;font:700 14px var(--hd);letter-spacing:.2em;padding:11px;cursor:pointer;margin-top:8px}
+.btn:hover:not(:disabled){border-color:var(--ol)}
+.btn:disabled{opacity:.35;cursor:default}
+.btn.go{background:#24361f;border-color:#3f5a33;color:#cfe3bd}
+.row2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.field{display:flex;flex-direction:column;gap:3px;font:500 10px var(--mono);letter-spacing:.16em;color:var(--mu)}
+.field input{background:#0c100d;border:1px solid var(--ln2);color:var(--tx);font:600 14px var(--mono);padding:6px 8px;border-radius:2px;width:100%}
+#stop{background:repeating-linear-gradient(135deg,#b3262b 0 18px,#a52126 18px 36px);border:2px solid #ff6b6f;color:#fff;font:800 26px var(--hd);letter-spacing:.3em;padding:18px;margin-top:12px;text-shadow:0 1px 0 #000}
+#stop small{display:block;font:600 10px var(--mono);letter-spacing:.3em;opacity:.85;margin-top:2px}
+#restart{font-size:11px;padding:8px;color:var(--mu)}
+/* guarded arm switch */
+.guard{position:relative;margin-top:10px;height:54px}
+.guard .sw{position:absolute;inset:0;border-radius:2px;border:1px solid #6b2a2a;background:#2a1414;color:#ffb3b5;font:800 15px var(--hd);letter-spacing:.3em;cursor:pointer}
+.guard .sw.armed{background:#7a1c1f;border-color:#ff6b6f;color:#fff;box-shadow:inset 0 0 18px rgba(255,80,80,.5)}
+/* priority board */
+.pc{display:grid;grid-template-columns:52px 1fr auto;gap:2px 12px;align-items:center;padding:9px 10px;border:1px solid var(--ln);border-left:4px solid var(--c,var(--dim));background:var(--pn2);margin-bottom:7px}
+.pc .lb{grid-row:span 2;font:700 22px var(--hd);letter-spacing:.06em;color:#e9eee3}
+.pc .tag{font:700 11px var(--mono);letter-spacing:.2em;color:var(--c,var(--mu))}
+.pc .pct{grid-row:span 2;font:700 26px var(--mono);color:var(--c,var(--mu));text-align:right}
+.pc .rs{font:500 11px var(--mono);color:var(--mu);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pc .pb{grid-column:2/4;height:4px;background:#1a211b}.pc .pb i{display:block;height:100%;background:var(--c,var(--dim))}
+.pc.live{animation:pulse 1.6s ease-in-out infinite}
+@keyframes pulse{50%{border-color:var(--wn)}}
+.empty{font:500 12px var(--mono);color:var(--dim);padding:8px 2px}
+/* sitrep + feed */
+#sitrep{width:100%;min-height:92px;resize:vertical;background:#070907;border:1px solid var(--ln2);color:#cfe3bd;font:500 12px/1.5 var(--mono);padding:8px;border-radius:2px}
+.feed-l{max-height:260px;overflow:auto;font:500 12px/1.55 var(--mono)}
+.feed-l div{display:grid;grid-template-columns:78px 1fr;gap:8px;padding:2px 0;border-bottom:1px dashed #1c241d}
+.feed-l div b{color:var(--ol);font-weight:600}
+.feed-l .hot{color:#ffd28a}.feed-l .crit{color:#ff8f92}
+/* diagnostics */
+details.diag{margin:0 20px 20px;border:1px solid var(--ln);background:var(--pn);border-radius:4px}
+details.diag summary{cursor:pointer;padding:10px 14px;font:600 12px var(--mono);letter-spacing:.24em;color:var(--mu);list-style:none}
+details.diag summary::before{content:"\25B8  "}details.diag[open] summary::before{content:"\25BE  "}
+.dg{display:grid;grid-template-columns:1fr 1fr;gap:14px;padding:0 14px 14px}
+@media(max-width:1100px){.dg{grid-template-columns:1fr}}
+.chip{display:inline-block;margin:0 6px 6px 0;padding:3px 8px;border:1px solid var(--ln2);border-radius:2px;font:500 11px var(--mono);color:var(--mu)}
+.chip.ok{color:var(--ok);border-color:#2f5a35}.chip.wn{color:var(--wn);border-color:#5a4a1c}.chip.bad{color:var(--bad);border-color:#5a1d1a}
+pre{margin:0;font:11px/1.45 var(--mono);color:var(--mu);white-space:pre-wrap;max-height:240px;overflow:auto;background:#070907;border:1px solid var(--ln);padding:8px}
+.sbtn{background:#1c241d;color:var(--tx);border:1px solid var(--ln2);border-radius:3px;font:600 11px var(--mono);letter-spacing:.12em;padding:7px 10px;cursor:pointer;margin:0 6px 6px 0}
+.dg h3{margin:4px 0 8px;font:600 11px var(--mono);letter-spacing:.2em;color:var(--ol)}
+.dg a{color:var(--cy)}
+</style></head><body>
+<canvas id="topo"></canvas>
+<div class="app">
+<div class="banner">EXERCISE · EXERCISE · EXERCISE</div>
+<header>
+ <div class="brand">
+  <svg viewBox="0 0 48 48" aria-hidden="true"><circle cx="24" cy="24" r="21" fill="none" stroke="#6f8556" stroke-width="2"/><circle cx="24" cy="24" r="16" fill="none" stroke="#36443a" stroke-width="1"/>
+   <path d="M6 26 H16 L19 18 L23 33 L27 12 L31 30 L33 26 H42" fill="none" stroke="#9bb07a" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/></svg>
+  <div><h1>TEAM LIFELINE</h1><div class="sub">OPERATION LOST &amp; FOUND · HQ CONSOLE</div></div>
+ </div>
+ <div class="hdr-r">
+  <div class="clk"><b id="tmis">T+00:00</b><span>MISSION</span></div>
+  <div class="clk"><b id="tloc">--:--:--</b><span>LOCAL</span></div>
+  <div class="clk"><b id="tzul">--:--:--Z</b><span>ZULU</span></div>
+  <button class="tbtn" id="night">RED LIGHT</button>
+ </div>
+</header>
+<div class="status" id="status"></div>
+<main>
+ <div>
+  <div class="card">
+   <div class="ch"><h2>Area of Operations</h2><span class="meta" id="aoMeta">TOP-DOWN · TO SCALE</span></div>
+   <div class="tools" id="tools">
+    <button data-m="target" class="on">TARGET</button><button data-m="box">OBSTACLE</button><button data-m="del">DEL OBSTACLE</button>
+    <button data-m="mark">MARK STRUCTURE</button><button data-m="ignore">IGNORE AREA</button><button data-m="unarea">REMOVE AREA</button>
+   </div>
+   <div id="msg"></div>
+   <canvas id="cv" width="960" height="320"></canvas>
+   <div class="legend">
+    <span style="--c:rgba(229,72,77,.6)">DEPTH OBSTACLE</span><span style="--c:rgba(217,164,65,.55)">NO DEPTH / MANUAL</span>
+    <span style="--c:rgba(95,174,106,.35);--b:#5fae6a">MARKED STRUCTURE</span><span style="--c:rgba(127,140,124,.4)">IGNORED AREA</span>
+    <span style="--c:#4fb3bf">ROUTE</span><span style="--c:#7fb7ff">ROVER</span>
+   </div>
+  </div>
+  <div class="card">
+   <div class="ch"><h2>Overwatch Feed</h2><span class="meta" id="feedMeta">—</span></div>
+   <img class="feed" id="live" alt="overwatch feed">
+  </div>
+ </div>
+ <div>
+  <div class="card">
+   <div class="ch"><h2>Command</h2><span class="meta" id="mode2">—</span></div>
+   <div class="state"><b id="badge">IDLE</b><span id="stepn"></span></div>
+   <div class="why" id="reason"></div>
+   <div class="bar"><i id="barI"></i></div>
+   <div class="kv"><span id="prog">NO TARGET</span><span id="tinfo"></span></div>
+   <div class="guard" id="guard"><button class="sw" id="armsw">ARM MOTION</button></div>
+   <div class="row2" style="margin-top:10px">
+    <label class="field">DWELL (S)<input type="number" id="mdw" value="15" min="1" max="120"></label>
+    <label class="field">STANDOFF (MM)<input type="number" id="mgap" value="110" min="60" max="250"></label>
+   </div>
+   <button class="btn go" id="mstart">LAUNCH MISSION</button>
+   <button class="btn" id="start">EXECUTE ROUTE TO TARGET</button>
+   <button class="btn" id="stop">STOP<small>SPACE BAR</small></button>
+   <button class="btn" id="restart">RESTART · FRESH MISSION</button>
+  </div>
+  <div class="card">
+   <div class="ch"><h2>Survivor Priority</h2><span class="meta" id="prioMeta">P(LIFE) · UNO Q</span></div>
+   <div id="prio"></div>
+  </div>
+  <div class="card">
+   <div class="ch"><h2>SITREP</h2><span class="meta" id="sitLen">0 CHAR</span></div>
+   <textarea id="sitrep" readonly></textarea>
+   <div class="row2" style="margin-top:8px"><button class="btn" id="sitCopy" style="margin:0">COPY SITREP</button><button class="btn" id="sitShort" style="margin:0">SMS FORMAT</button></div>
+  </div>
+  <div class="card">
+   <div class="ch"><h2>Event Feed</h2><span class="meta">LATEST FIRST</span></div>
+   <div class="feed-l" id="feed"><div class="empty">no events yet</div></div>
+  </div>
+ </div>
+</main>
+<details class="diag" id="diag"><summary>DIAGNOSTICS</summary>
+ <div class="dg">
+  <div>
+   <h3>TRACKING</h3><div id="chips"></div><div id="timing"></div>
+   <h3>ROVER / CLEARANCE</h3>
+   <div class="row2"><label class="field">ROVER W MM<input type="number" id="rw" step="5" min="0" max="600"></label><label class="field">ROVER L MM<input type="number" id="rl" step="5" min="0" max="600"></label></div>
+   <label class="field" style="margin-top:6px">MARGIN MM<input type="number" id="mm" step="5" min="0" max="200"></label>
+   <div style="margin:8px 0" id="clr" class="chip"></div>
+   <div><button class="sbtn" id="recal">RECALIBRATE GROUND</button><button class="sbtn" id="clrmap">CLEAR DEPTH MAP</button><button class="sbtn" id="rec">RECORD DEPTH+RGB</button><span class="chip" id="recn"></span></div>
+   <h3>FULL REASON</h3><pre id="fullwhy">—</pre>
+   <h3>STRUCTURES</h3><pre id="mlist"></pre>
+   <h3>SCENE CHANGES</h3><div id="sstat" class="chip"></div><div id="elist" style="font:12px var(--mono);margin:6px 0"></div><pre id="supd"></pre>
+  </div>
+  <div>
+   <h3>RGB + DEPTH</h3><img class="feed" id="cam" style="cursor:default" alt="camera">
+   <h3>NAVIGATOR LOG</h3><pre id="log"></pre>
+  </div>
+ </div>
+</details>
+</div>
+<script>
+const $=id=>document.getElementById(id);const cv=$("cv"),ctx=cv.getContext("2d");
+let S=null,img=new Image(),imgSeq=-1,drag=null,camSeq=-1,liveKey="",d0=1,mode="target",smsFmt=false,missionT0=null,lastMissionState="idle";
+const feed=[],seen=new Set();let feedN=0;
+const secOf=hms=>{const m=/^(\d\d):(\d\d):(\d\d)/.exec(hms||"");return m?(+m[1])*3600+(+m[2])*60+(+m[3]):0};
+const nowSec=()=>{const d=new Date();return d.getHours()*3600+d.getMinutes()*60+d.getSeconds()};
+const post=(p,b)=>fetch(p,{method:"POST",headers:{"X-Requested-With":"nav","Content-Type":"application/json"},body:JSON.stringify(b||{})}).then(async r=>({status:r.status,...await r.json()})).catch(e=>({error:String(e)}));
+const X=x=>x*cv.width,Y=y=>(1-y)*cv.height;
+const pad=n=>String(n).padStart(2,"0");
+function toNorm(e){const r=cv.getBoundingClientRect();return [(e.clientX-r.left)/r.width,1-(e.clientY-r.top)/r.height]}
+const GC=6,GR=4;                                  // human grid reference: columns A-F, rows 1-4 (row 1 at the bottom)
+const gridRef=(x,y)=>String.fromCharCode(65+Math.max(0,Math.min(GC-1,Math.floor(x*GC))))+(1+Math.max(0,Math.min(GR-1,Math.floor(y*GR))));
+
+/* ---------------- topographic background (drawn once, offline) ---------------- */
+function topo(){
+ const c=$("topo"),w=c.width=innerWidth,h=c.height=innerHeight,g=c.getContext("2d");
+ g.fillStyle="#0a0d0b";g.fillRect(0,0,w,h);
+ let seed=7;const rnd=()=>((seed=(seed*16807)%2147483647)/2147483647);
+ const hills=[];for(let i=0;i<16;i++)hills.push([rnd()*w,rnd()*h,(.25+rnd()*.75)*(rnd()<.25?-1:1),120+rnd()*360]);
+ const f=(x,y)=>{let s=0;for(const[hx,hy,a,r]of hills){const d=((x-hx)**2+(y-hy)**2)/(r*r);s+=a*Math.exp(-d)}return s};
+ const st=10,nx=Math.ceil(w/st)+1,ny=Math.ceil(h/st)+1,F=new Float32Array(nx*ny);
+ for(let j=0;j<ny;j++)for(let i=0;i<nx;i++)F[j*nx+i]=f(i*st,j*st);
+ const lv=[];for(let k=-12;k<=20;k++)lv.push(k*0.07);
+ lv.forEach((L,k)=>{g.beginPath();g.strokeStyle=k%5===0?"rgba(155,176,122,.13)":"rgba(155,176,122,.055)";g.lineWidth=k%5===0?1.1:.8;
+  for(let j=0;j<ny-1;j++)for(let i=0;i<nx-1;i++){
+   const a=F[j*nx+i],b=F[j*nx+i+1],cc=F[(j+1)*nx+i+1],d=F[(j+1)*nx+i];
+   const id=(a>L)|((b>L)<<1)|((cc>L)<<2)|((d>L)<<3);if(id===0||id===15)continue;
+   const x0=i*st,y0=j*st,t=(p,q)=>(L-p)/(q-p);
+   const E=[[x0+t(a,b)*st,y0],[x0+st,y0+t(b,cc)*st],[x0+t(d,cc)*st,y0+st],[x0,y0+t(a,d)*st]];
+   const segs={1:[[3,0]],2:[[0,1]],3:[[3,1]],4:[[1,2]],5:[[3,0],[1,2]],6:[[0,2]],7:[[3,2]],8:[[2,3]],9:[[0,2]],10:[[0,1],[2,3]],11:[[1,2]],12:[[1,3]],13:[[0,1]],14:[[0,3]]}[id];
+   segs.forEach(([p,q])=>{g.moveTo(E[p][0],E[p][1]);g.lineTo(E[q][0],E[q][1])})}
+  g.stroke()});
+ g.strokeStyle="rgba(155,176,122,.045)";g.lineWidth=1;g.beginPath();
+ for(let x=0;x<w;x+=96){g.moveTo(x+.5,0);g.lineTo(x+.5,h)}for(let y=0;y<h;y+=96){g.moveTo(0,y+.5);g.lineTo(w,y+.5)}g.stroke();
+ g.fillStyle="rgba(155,176,122,.16)";g.font="10px Consolas,monospace";
+ for(let x=96,i=0;x<w;x+=96,i++)g.fillText(String(18+i).padStart(2,"0"),x+3,12);
+ for(let y=96,i=0;y<h;y+=96,i++)g.fillText(String(42+i),3,y-3);
+ const v=g.createRadialGradient(w/2,h/2,Math.min(w,h)*.3,w/2,h/2,Math.max(w,h)*.75);v.addColorStop(0,"rgba(0,0,0,0)");v.addColorStop(1,"rgba(0,0,0,.55)");g.fillStyle=v;g.fillRect(0,0,w,h);
+}
+topo();let rz;addEventListener("resize",()=>{clearTimeout(rz);rz=setTimeout(topo,200)});
+
+/* ---------------- clocks ---------------- */
+function clocks(){const d=new Date();
+ $("tloc").textContent=pad(d.getHours())+":"+pad(d.getMinutes())+":"+pad(d.getSeconds());
+ $("tzul").textContent=pad(d.getUTCHours())+":"+pad(d.getUTCMinutes())+":"+pad(d.getUTCSeconds())+"Z";
+ if(missionT0){const s=Math.floor((Date.now()-missionT0)/1000);$("tmis").textContent="T+"+pad(Math.floor(s/60))+":"+pad(s%60)}}
+setInterval(clocks,500);clocks();
+function dtg(){const d=new Date(),M=["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"];
+ return pad(d.getUTCDate())+pad(d.getUTCHours())+pad(d.getUTCMinutes())+"Z"+M[d.getUTCMonth()]+String(d.getUTCFullYear()).slice(2)}
+function zOf(hms){const m=/^(\d\d):(\d\d):(\d\d)/.exec(hms||"");if(!m)return "";const d=new Date();d.setHours(+m[1],+m[2],+m[3]);return pad(d.getUTCHours())+pad(d.getUTCMinutes())+":"+pad(d.getUTCSeconds())+"Z"}
+
+/* ---------------- messages ---------------- */
+function plain(t){if(!t)return "";
+ const R=[[/would bring the rover footprint into an obstacle|footprint into an obstacle/i,"Blocked: next move too close to an obstacle"],
+  [/start cell is inside the turn-clearance halo/i,"Rover boxed in: no room to turn"],
+  [/no route/i,"No safe route to the target"],[/too close to an obstacle or the table edge/i,"Too close to an obstacle or the edge"],
+  [/tracking lost|not tracked|rover not found/i,"Rover tracking lost"],[/calibration/i,"Calibration problem"],[/stopped by operator|stopped \/ disarmed/i,"Stopped by operator"],
+  [/reached target/i,"Target reached"],[/whole rover.*does not fit/i,"Rover does not fit there"]];
+ for(const[r,s]of R)if(r.test(t))return s;const s=t.split(/[:\[(]/)[0].trim();return s.length>90?s.slice(0,88)+"…":s}
+function say(t,good,sug){const m=$("msg");m.className=good?"good":"";m.style.display=t?"block":"none";m.textContent=t||"";
+ if(sug){const b=document.createElement("button");b.className="sbtn";b.textContent="USE SUGGESTED POINT";b.onclick=()=>pick({x:sug[0],y:sug[1]});m.appendChild(b)}}
+async function pick(body){
+ const r=await post("/api/target",body);
+ if(r.ok){say(r.retargeted?"New target accepted: rover stopped, replanning.":"Target set.",true);setTimeout(()=>say(""),2500);if(S)S._sug=null}
+ else{say("Target rejected: "+plain(r.reason||r.msg||r.error||"unknown")+(r.suggestion?". Nearest point where the rover fits is marked.":""),false,r.suggestion);if(S)S._sug=r.suggestion||null}}
+
+/* ---------------- map ---------------- */
+function rr(cx,cy,th,L,W){ctx.save();ctx.translate(cx,cy);ctx.rotate(-th);ctx.strokeRect(-L/2,-W/2,L,W);ctx.restore()}
+function prec(L,st){if(st==="unreachable"||st==="failed")return["NO ACCESS","#7f8c7c"];if(st==="gone")return["GONE","#56624f"];
+ if(!L)return st==="collecting"?["INSPECTING","#d9a441"]:["PENDING","#56624f"];
+ return L.p>0.6?["URGENT","#e5484d"]:(L.p>0.2?["PRIORITY","#d9a441"]:["ROUTINE","#5fae6a"])}
+function draw(){
+ if(!S)return;const asp=S.calib.aspect||1.5;const h=Math.round(cv.width/asp);if(cv.height!==h)cv.height=h;
+ ctx.clearRect(0,0,cv.width,cv.height);
+ if(img.complete&&img.naturalWidth){ctx.drawImage(img,0,0,cv.width,cv.height);ctx.fillStyle="rgba(8,12,9,.28)";ctx.fillRect(0,0,cv.width,cv.height)}
+ else{ctx.fillStyle="#050605";ctx.fillRect(0,0,cv.width,cv.height);ctx.fillStyle="#7f8c7c";ctx.font="13px Consolas,monospace";ctx.fillText("AWAITING FRAME + BOUNDARY MARKERS",20,30)}
+ // grid reference A-F / 1-4
+ ctx.strokeStyle="rgba(155,176,122,.28)";ctx.lineWidth=1;ctx.setLineDash([2,4]);ctx.beginPath();
+ for(let i=1;i<GC;i++){ctx.moveTo(X(i/GC)+.5,0);ctx.lineTo(X(i/GC)+.5,cv.height)}for(let j=1;j<GR;j++){ctx.moveTo(0,Y(j/GR)+.5);ctx.lineTo(cv.width,Y(j/GR)+.5)}ctx.stroke();ctx.setLineDash([]);
+ ctx.font="600 11px Consolas,monospace";ctx.fillStyle="rgba(201,214,180,.75)";
+ for(let i=0;i<GC;i++)ctx.fillText(String.fromCharCode(65+i),X((i+.5)/GC)-4,13);for(let j=0;j<GR;j++)ctx.fillText(String(j+1),5,Y((j+.5)/GR)+4);
+ const dc=S.depth_cells;ctx.fillStyle="rgba(229,72,77,.45)";
+ (dc.cells||[]).forEach(([c,r,v])=>{if(v>=0.5)ctx.fillRect(X(c/dc.cols),Y((r+1)/dc.rows),cv.width/dc.cols+1,cv.height/dc.rows+1)});
+ ctx.fillStyle="rgba(217,164,65,.35)";(dc.unknown||[]).forEach(([c,r])=>ctx.fillRect(X(c/dc.cols),Y((r+1)/dc.rows),cv.width/dc.cols+1,cv.height/dc.rows+1));
+ ctx.fillStyle="rgba(217,164,65,.45)";ctx.strokeStyle="#d9a441";ctx.lineWidth=2;
+ S.manual.forEach(r=>{ctx.fillRect(X(r[0]),Y(r[3]),X(r[2])-X(r[0]),Y(r[1])-Y(r[3]));ctx.strokeRect(X(r[0]),Y(r[3]),X(r[2])-X(r[0]),Y(r[1])-Y(r[3]))});
+ if(S.areas){ctx.lineWidth=2;ctx.setLineDash([6,4]);
+  S.areas.mark.forEach(r=>{ctx.fillStyle="rgba(95,174,106,.22)";ctx.strokeStyle="#5fae6a";ctx.fillRect(X(r[0]),Y(r[3]),X(r[2])-X(r[0]),Y(r[1])-Y(r[3]));ctx.strokeRect(X(r[0]),Y(r[3]),X(r[2])-X(r[0]),Y(r[1])-Y(r[3]))});
+  S.areas.ignore.forEach(r=>{ctx.fillStyle="rgba(127,140,124,.32)";ctx.strokeStyle="#7f8c7c";ctx.fillRect(X(r[0]),Y(r[3]),X(r[2])-X(r[0]),Y(r[1])-Y(r[3]));ctx.strokeRect(X(r[0]),Y(r[3]),X(r[2])-X(r[0]),Y(r[1])-Y(r[3]));
+   ctx.beginPath();ctx.moveTo(X(r[0]),Y(r[3]));ctx.lineTo(X(r[2]),Y(r[1]));ctx.moveTo(X(r[0]),Y(r[1]));ctx.lineTo(X(r[2]),Y(r[3]));ctx.stroke()});
+  ctx.setLineDash([])}
+ if(drag&&drag.b){ctx.strokeStyle="#e9eee3";ctx.setLineDash([5,4]);const a=drag.a,b=drag.b;ctx.strokeRect(X(Math.min(a[0],b[0])),Y(Math.max(a[1],b[1])),Math.abs(X(a[0])-X(b[0])),Math.abs(Y(a[1])-Y(b[1])));ctx.setLineDash([])}
+ const sw=S.sweep,hc=cv.height;
+ if(sw&&sw.L){ctx.strokeStyle="rgba(79,179,191,.35)";ctx.lineWidth=1;sw.rects.forEach(r=>rr(X(r[0]),Y(r[1]),r[2],sw.L*hc,sw.W*hc))}
+ const P=S.path;if(P&&P.length>1){ctx.strokeStyle="#4fb3bf";ctx.lineWidth=3;ctx.setLineDash([10,6]);ctx.beginPath();P.forEach((p,i)=>i?ctx.lineTo(X(p[0]),Y(p[1])):ctx.moveTo(X(p[0]),Y(p[1])));ctx.stroke();ctx.setLineDash([]);
+  ctx.fillStyle="#4fb3bf";P.forEach(p=>{ctx.beginPath();ctx.arc(X(p[0]),Y(p[1]),3.5,0,7);ctx.fill()})}
+ if(S.target){const t=S.target,tr=(S.nav.arrive_tol_mm/(S.calib.height_mm||1e9))*hc,tx=X(t[0]),ty=Y(t[1]);ctx.strokeStyle="#9bb07a";ctx.lineWidth=2;
+  ctx.beginPath();ctx.arc(tx,ty,Math.max(tr,6),0,7);ctx.stroke();ctx.beginPath();
+  [[-18,-7],[7,18]].forEach(([a,b])=>{ctx.moveTo(tx+a,ty);ctx.lineTo(tx+b,ty);ctx.moveTo(tx,ty+a);ctx.lineTo(tx,ty+b)});ctx.stroke()}
+ if(S._sug){ctx.strokeStyle="#d9a441";ctx.lineWidth=3;ctx.setLineDash([5,4]);ctx.beginPath();ctx.arc(X(S._sug[0]),Y(S._sug[1]),12,0,7);ctx.stroke();ctx.setLineDash([])}
+ // structures + events with precedence colours
+ if(S.mission){[...S.mission.structures,...(S.mission.events||[])].forEach(x=>{const[tg,col]=prec(x.life,x.status),cx=X(x.x),cy=Y(x.y);
+   ctx.strokeStyle=col;ctx.lineWidth=2;ctx.beginPath();ctx.arc(cx,cy,14,0,7);ctx.stroke();
+   const t=x.label+(x.life?" "+Math.round(100*x.life.p)+"%":"");ctx.font="700 13px Consolas,monospace";const w=ctx.measureText(t).width+10;
+   ctx.fillStyle="rgba(5,7,6,.82)";ctx.fillRect(cx-w/2,cy-36,w,18);ctx.fillStyle=col;ctx.fillText(t,cx-w/2+5,cy-23)})}
+ const p=S.pose;if(p){const cx=X(p.x),cy=Y(p.y);ctx.fillStyle="#7fb7ff";ctx.strokeStyle="#7fb7ff";ctx.beginPath();ctx.arc(cx,cy,7,0,7);ctx.fill();
+  ctx.lineWidth=1;ctx.beginPath();ctx.arc(cx,cy,13,0,7);ctx.stroke();
+  if(p.theta!=null){const L=S.cfg.radius*hc*1.3;ctx.lineWidth=4;ctx.beginPath();ctx.moveTo(cx,cy);ctx.lineTo(cx+Math.cos(p.theta)*L,cy-Math.sin(p.theta)*L);ctx.stroke()}}
+}
+
+/* ---------------- status lights ---------------- */
+function light(name,val,cls){return `<div class="lt ${cls}"><i></i>${name} <b>${val}</b></div>`}
+function lights(){const s=S,c=s.calib,f=s.frame,se=s.sensors,ms=s.mission||{},sc=ms.scene||{};
+ const cam=f.err?["ERROR","bad"]:(f.age_s==null?["NO FEED","bad"]:(f.age_s<2?[f.age_s+"S","ok"]:(f.age_s<5?[f.age_s+"S","wn"]:[f.age_s+"S","bad"])));
+ const rov=s.dry_run?["DRY RUN","wn"]:(!s.motion_enabled?["DISABLED","wn"]:(s.pose?[S.nav.armed?"ARMED":"SAFE","ok"]:["LOST","bad"]));
+ const sen=!se?["OFF","wn"]:(!se.ok||se.age_s==null?["NO DATA","bad"]:(se.age_s<3?[(se.rate_hz!=null?"~"+se.rate_hz+"/S":"LIVE"),"ok"]:(se.age_s<15?[se.age_s+"S","wn"]:[se.age_s+"S","bad"])));
+ const cal=(c.boundary_live&&c.plane)?["OK","ok"]:(c.boundary_stored&&c.plane?["STORED","wn"]:["CHECK","bad"]);
+ const map=sc.map_age_s!=null?[sc.map_age_s+"S",sc.map_age_s<8?"ok":"wn"]:["IDLE",""];
+ const msn=ms.state==="running"?["ACTIVE","ok"]:(ms.state==="failed"?["FAILED","bad"]:[(ms.state||"idle").toUpperCase(),""]);
+ $("status").innerHTML=light("CAMERA",...cam)+light("ROVER LINK",...rov)+light("SENSORS",...sen)+light("CALIBRATION",...cal)+light("MAP AGE",...map)+light("MISSION",...msn)
+  +(se&&se.tag?light("TAGGING",se.tag,"wn"):"")}
+
+/* ---------------- priority board ---------------- */
+function why(L){return (L.reasons||[]).filter(r=>!/x0\.|x1$|x1 |collecting|peak during/.test(r)).map(r=>r.replace(/ x[\d.]+$/,"")).join(" · ")||(L.reasons||[]).slice(0,2).map(r=>r.replace(/ x[\d.]+$/,"")).join(" · ")}
+function board(){const ms=S.mission;if(!ms){$("prio").innerHTML="";return}
+ const items=[...ms.structures,...(ms.events||[])].filter(x=>!(x.status==="gone"&&!x.life));
+ const rank=x=>x.life?x.life.p:(x.status==="collecting"?-0.1:(x.status==="pending"||x.status==="visiting"?-0.2:-0.3));
+ items.sort((a,b)=>rank(b)-rank(a));
+ $("prio").innerHTML=items.map(x=>{const[tg,col]=prec(x.life,x.status),L=x.life,p=L?Math.round(100*L.p):null,live=x.status==="collecting";
+  const sub=L?why(L):(x.status==="unreachable"||x.status==="failed"?plain(x.reason):(x.status_text||"").toUpperCase());
+  return `<div class="pc${live?" live":""}" style="--c:${col}"><div class="lb">${x.label}</div><div class="tag">${tg}${live&&L&&!L.final?" · LIVE":""} · GRID ${gridRef(x.x,x.y)}</div>
+   <div class="pct">${p==null?"—":p+"%"}</div><div class="rs" title="${(L?(L.reasons||[]).join("; "):(x.reason||"")).replace(/"/g,"")}">${sub||"&nbsp;"}</div>
+   <div class="pb"><i style="width:${p==null?0:p}%"></i></div></div>`}).join("")||'<div class="empty">NO STRUCTURES DETECTED YET</div>';
+ const n=items.filter(x=>x.life&&x.life.p>0.6).length;$("prioMeta").textContent=n?n+" URGENT":"P(LIFE) · UNO Q"}
+
+/* ---------------- SITREP ---------------- */
+function sitrep(){const ms=S.mission;if(!ms)return;
+ const items=[...ms.structures,...(ms.events||[])];const g={URGENT:[],PRIORITY:[],ROUTINE:[],"NO ACCESS":[],PENDING:[],INSPECTING:[]};
+ items.forEach(x=>{const[tg]=prec(x.life,x.status);if(g[tg])g[tg].push(x)});
+ const ev=(ms.events||[]).map(e=>e.label+" "+(e.text||"change").toUpperCase().replace("NEW OBJECT","NEW OBJ")+" "+gridRef(e.x,e.y));
+ const det=x=>x.label+" "+Math.round(100*x.life.p)+"% "+gridRef(x.x,x.y)+(why(x.life)?" ("+why(x.life).toLowerCase().replace(/ · /g,", ")+")":"");
+ let t;
+ if(smsFmt){const parts=["LIFELINE "+dtg()];
+  if(g.URGENT.length)parts.push("URG "+g.URGENT.map(x=>x.label+" "+Math.round(100*x.life.p)+"% "+gridRef(x.x,x.y)).join(","));
+  if(g.PRIORITY.length)parts.push("PRI "+g.PRIORITY.map(x=>x.label+" "+Math.round(100*x.life.p)+"% "+gridRef(x.x,x.y)).join(","));
+  if(g.ROUTINE.length)parts.push("RTN "+g.ROUTINE.map(x=>x.label).join(","));
+  if(g["NO ACCESS"].length)parts.push("NOACC "+g["NO ACCESS"].map(x=>x.label+" "+gridRef(x.x,x.y)).join(","));
+  if(g.PENDING.length+g.INSPECTING.length)parts.push("PEND "+[...g.INSPECTING,...g.PENDING].map(x=>x.label).join(","));
+  t=parts.join(" | ")}
+ else{const L=["LIFELINE SITREP "+dtg(),"1. URGENT:    "+(g.URGENT.map(det).join("; ")||"NONE"),"2. PRIORITY:  "+(g.PRIORITY.map(det).join("; ")||"NONE"),
+  "3. ROUTINE:   "+(g.ROUTINE.map(x=>x.label+" "+gridRef(x.x,x.y)).join(", ")||"NONE"),"4. NO ACCESS: "+(g["NO ACCESS"].map(x=>x.label+" "+gridRef(x.x,x.y)).join(", ")||"NONE"),
+  "5. PENDING:   "+([...g.INSPECTING,...g.PENDING].map(x=>x.label).join(", ")||"NONE"),"6. CHANGES:   "+(ev.join("; ")||"NONE"),
+  "7. ROVER:     "+(S.pose?"AT "+gridRef(S.pose.x,S.pose.y):"NOT TRACKED")+", MISSION "+(ms.state||"idle").toUpperCase()];t=L.join("\n")}
+ if(document.activeElement!==$("sitrep"))$("sitrep").value=t;$("sitLen").textContent=t.length+" CHAR"}
+$("sitShort").onclick=()=>{smsFmt=!smsFmt;$("sitShort").textContent=smsFmt?"FULL FORMAT":"SMS FORMAT";if(S)sitrep()};
+$("sitCopy").onclick=async()=>{const t=$("sitrep").value;try{await navigator.clipboard.writeText(t)}catch(e){$("sitrep").select();document.execCommand("copy")}
+ $("sitCopy").textContent="COPIED";setTimeout(()=>$("sitCopy").textContent="COPY SITREP",1400)};
+
+/* ---------------- event feed ---------------- */
+function feedText(m){return m.replace(/^started: capturing the baseline scene.*$/,"Mission started: baseline scene captured")
+ .replace(/\(scene \d+ vs \d+, [\d.]+s after capture\): /,": ").replace(/: collecting sensor data \(([\d.]+) s\).*$/,": collecting sensor data ($1 s)")
+ .replace(/ \[sensor link off\]/,"").replace(/rover stopped, re-observing; not counted as collected/,"rover stopped")
+ .replace(/unreachable: (.*)$/,(a,b)=>"unreachable: "+plain(b).toLowerCase())}
+function feedAdd(lines,src){lines.forEach(l=>{if(seen.has(l))return;seen.add(l);const m=/^(\d\d:\d\d:\d\d) (.*)$/.exec(l);if(!m)return;
+  let t=m[2].replace(/^mission: /,"");if(src==="nav"&&!/^(armed|disarmed|RESTART|reached target|FAILED|NO ROUTE)/.test(t))return;
+  t=src==="nav"?plain(t)||t:feedText(t);feed.unshift({k:secOf(m[1]),n:++feedN,z:zOf(m[1]),t,c:/URGENT|LIKELY|detected|new object|moved/i.test(t)?"hot":(/unreachable|FAILED|failed|lost|Blocked/i.test(t)?"crit":"")})});
+ feed.sort((a,b)=>b.k-a.k||b.n-a.n);feed.splice(60);$("feed").innerHTML=feed.map(e=>`<div><b>${e.z}</b><span class="${e.c}">${e.t}</span></div>`).join("")||'<div class="empty">no events yet</div>'}
+function lifeEvents(){const ms=S.mission;if(!ms)return;[...ms.structures,...(ms.events||[])].forEach(x=>{if(x.life&&x.life.final){
+ const k="life|"+x.label+"|"+x.life.p;if(seen.has(k))return;seen.add(k);const[tg]=prec(x.life,x.status);const d=new Date();
+ feed.unshift({k:nowSec(),n:++feedN,z:pad(d.getUTCHours())+pad(d.getUTCMinutes())+":"+pad(d.getUTCSeconds())+"Z",t:x.label+" P(life) "+Math.round(100*x.life.p)+"% → "+tg+(why(x.life)?" ("+why(x.life).toLowerCase()+")":""),c:tg==="URGENT"?"crit":(tg==="PRIORITY"?"hot":"")})}})}
+
+/* ---------------- main UI ---------------- */
+function chip(t,c){return `<span class="chip ${c||""}">${t}</span>`}
+function ui(){
+ const s=S,n=s.nav,c=s.calib,hm=c.height_mm,ms=s.mission;
+ const col={running:"#7fb7ff",done:"#5fae6a",failed:"#e5484d",idle:"#d5dccf"}[n.state]||"#d5dccf";
+ $("badge").textContent=(ms&&ms.state==="running"?"MISSION · ":"")+n.state.toUpperCase()+(n.cruising?" · CRUISE":"");$("badge").style.color=ms&&ms.state==="running"?"#9bb07a":col;
+ const full=n.reason||s.plan_error||s.plan_warning||"";$("reason").innerHTML=full?plain(full)+(plain(full)!==full?' · <a onclick="document.getElementById(\'diag\').open=true;document.getElementById(\'fullwhy\').scrollIntoView()">details</a>':""):"";
+ $("fullwhy").textContent=full||"—";
+ $("mode2").textContent=s.dry_run?"DRY RUN":(s.motion_enabled?"LIVE UGV LINK":"MOTION DISABLED");
+ $("start").disabled=!(n.armed&&s.target&&n.state!=="running"&&s.pose&&!s.plan_error);
+ $("prog").textContent=s.target?(n.dist==null?"TARGET SET":("DIST "+(hm?Math.round(n.dist*hm)+" MM":n.dist.toFixed(3))+" · TOL "+n.arrive_tol_mm+" MM")):"NO TARGET";
+ $("stepn").textContent=n.step?("STEP "+n.step):"";
+ const ti=s.target_info;$("tinfo").textContent=ti?("TGT "+gridRef(ti.x,ti.y)):"";
+ if(s.target&&n.dist!=null){if(n.state!=="running"||!d0)d0=Math.max(n.dist,0.001);$("barI").style.width=Math.max(0,Math.min(100,100*(1-n.dist/d0)))+"%"}
+ // guarded arm
+ const sw=$("armsw");sw.classList.toggle("armed",n.armed);sw.disabled=!s.motion_enabled;
+ sw.textContent=!s.motion_enabled?"MOTION DISABLED ON SERVER":(n.armed?"ARMED · CLICK TO SAFE":"ARM MOTION");
+ // mission
+ if(ms){const run=ms.state==="running";
+  if(run&&lastMissionState!=="running")missionT0=Date.now();lastMissionState=ms.state;
+  $("mstart").disabled=!(n.armed&&!run&&n.state!=="running"&&s.pose);$("mstart").textContent=run?"MISSION IN PROGRESS":"LAUNCH MISSION";
+  if(document.activeElement!==$("mdw")&&run)$("mdw").value=ms.dwell_s;
+  const act=[...ms.structures,...(ms.events||[])].find(x=>(x.id===ms.active||x.label===ms.active)&&x.status==="collecting");
+  $("aoMeta").textContent=act&&ms.countdown!=null?("INSPECTING "+act.label+" · "+Math.ceil(ms.countdown)+" S"):"TOP-DOWN · TO SCALE";
+  board();sitrep();feedAdd(ms.log||[],"mission");
+  $("mlist").textContent=ms.structures.map(x=>x.label+"  "+gridRef(x.x,x.y)+"  "+x.status_text+(x.reason?"  ("+x.reason+")":"")).join("\n")||"—";
+  const sc=ms.scene||{};
+  $("sstat").textContent=sc.baseline?("BASELINE #"+sc.baseline.seq+" @"+sc.baseline.rx_time+" · "+sc.count+" UPDATES · EVERY "+sc.period_s+" S"):"NO BASELINE (CAPTURED AT LAUNCH)";
+  $("elist").innerHTML=(ms.events||[]).map(e=>"<div><b>"+e.label+"</b> "+e.text+": "+e.status_text+(e.reason?" ("+e.reason+")":"")+" <a href='/api/event.jpg?id="+e.id+"' target='_blank'>evidence</a></div>").join("");
+  $("supd").textContent=(sc.updates||[]).slice().reverse().map(u=>"#"+u.n+" seq "+u.seq+" rx "+(u.rx_time||"-")+(u.interval_s!=null?" (+"+u.interval_s+" s)":"")+" "+(u.valid?"ok":"INVALID "+(u.why||u.status||""))+((u.new_events||[]).length?" NEW "+u.new_events.join(","):"")).join("\n")}
+ lifeEvents();feedAdd(s.log||[],"nav");lights();
+ $("feedMeta").textContent=s.frame.seq!=null?("FRAME "+s.frame.seq+" · "+(s.frame.age_s==null?"—":s.frame.age_s+" S")):"NO FEED";
+ // diagnostics
+ $("chips").innerHTML=chip("boundary "+(c.boundary_live?"live":(c.boundary_stored?"stored":"MISSING")),c.boundary_live?"ok":(c.boundary_stored?"wn":"bad"))
+  +chip("ground plane "+(c.plane?"ok":"not fit"),c.plane?"ok":"bad")+chip("aspect "+c.aspect+(c.aspect_measured?" (depth)":" (assumed)"),c.aspect_measured?"ok":"wn")
+  +chip("rover "+(s.pose?("tracked: "+(s.pose_source||"")):"LOST"),s.pose?"ok":"bad")+(s.warnings||[]).map(w=>chip(w,"wn")).join("")+(s.frame.err?chip("camera: "+s.frame.err,"bad"):"");
+ $("timing").innerHTML=chip("run "+(n.run_s==null?"-":n.run_s+" s"))+chip("transfer "+(n.avg_fetch_ms||s.frame.fetch_ms)+" ms")+chip("latency ~"+n.latency_s.toFixed(1)+" s");
+ [["rw",s.cfg.rover_w_mm],["rl",s.cfg.rover_l_mm],["mm",s.cfg.margin_mm]].forEach(([i,v])=>{if(document.activeElement!==$(i))$(i).value=v==null?"":v});
+ $("clr").textContent="clearance r "+s.cfg.radius.toFixed(3)+" + margin "+s.cfg.margin.toFixed(3)+(hm?" · sandbox h "+Math.round(hm)+" mm":"");
+ $("log").textContent=s.log.join("\n");$("recn").textContent=s.recording?("recording "+s.recording.n+" frames"):"";$("rec").textContent=s.recording?"STOP RECORDING":"RECORD DEPTH+RGB";
+}
+async function poll(){
+ try{S=await (await fetch("/api/state")).json();
+  if(S.frame.seq!==imgSeq&&S.calib.boundary_stored){imgSeq=S.frame.seq;const im=new Image();im.onload=()=>{img=im;draw()};im.src="/api/view.jpg?"+imgSeq}
+  if(S.frame.seq!=null){const k=S.frame.seq+"|"+JSON.stringify(S.target)+"|"+S.path.length;if(k!==liveKey){liveKey=k;$("live").src="/api/live.jpg?"+Date.now()}
+   if($("diag").open&&S.frame.seq!==camSeq){camSeq=S.frame.seq;$("cam").src="/api/camera.jpg?"+camSeq}}
+  ui();draw()}catch(e){$("status").innerHTML=light("HQ LINK","LOST","bad")}
+ setTimeout(poll,600)}
+poll();
+
+/* ---------------- input ---------------- */
+$("tools").onclick=e=>{const b=e.target.closest("button");if(!b)return;mode=b.dataset.m;[...$("tools").children].forEach(x=>x.classList.toggle("on",x===b))};
+cv.addEventListener("pointerdown",e=>{if(!S)return;const p=toNorm(e),m=mode;
+ if(m==="target")pick({x:p[0],y:p[1]});
+ else if(m==="unarea"){const A={mark:S.areas.mark.slice(),ignore:S.areas.ignore.slice()};let hit=false;
+  for(const k of ["mark","ignore"]){const i=A[k].findIndex(r=>p[0]>=r[0]&&p[0]<=r[2]&&p[1]>=r[1]&&p[1]<=r[3]);if(i>=0){A[k].splice(i,1);hit=true;break}}
+  if(hit)post("/api/areas",A).then(r=>{if(r.error)say(r.error)})}
+ else if(m==="del"){const k=S.manual.findIndex(r=>p[0]>=r[0]&&p[0]<=r[2]&&p[1]>=r[1]&&p[1]<=r[3]);if(k>=0){const rs=S.manual.slice();rs.splice(k,1);post("/api/manual",{rects:rs})}}
+ else{drag={a:p,b:p};try{cv.setPointerCapture(e.pointerId)}catch(_){}}});
+cv.addEventListener("pointermove",e=>{if(drag){drag.b=toNorm(e);draw()}});
+cv.addEventListener("pointerup",e=>{if(!drag)return;const a=drag.a,b=toNorm(e);drag=null;
+ const r=[Math.min(a[0],b[0]),Math.min(a[1],b[1]),Math.max(a[0],b[0]),Math.max(a[1],b[1])];if(r[2]-r[0]>0.01&&r[3]-r[1]>0.01){
+  if(mode==="mark"||mode==="ignore"){const A={mark:S.areas.mark.slice(),ignore:S.areas.ignore.slice()};A[mode].push(r);post("/api/areas",A).then(q=>{if(q.error)say(q.error)})}
+  else post("/api/manual",{rects:S.manual.concat([r])})}});
+$("live").addEventListener("click",e=>{if(!S||!S.frame.size||mode!=="target")return;const r=e.target.getBoundingClientRect();
+ pick({px:(e.clientX-r.left)/r.width*S.frame.size[0],py:(e.clientY-r.top)/r.height*S.frame.size[1]})});
+$("armsw").onclick=async()=>{const want=!(S&&S.nav.armed);const r=await post("/api/arm",{armed:want});if(r.error)say(r.error)};
+$("start").onclick=async()=>{const r=await post("/api/start");if(r.error||r.ok===false)say(plain(r.error||r.msg))};
+$("mstart").onclick=async()=>{const r=await post("/api/mission/start",{dwell_s:+$("mdw").value,gap_mm:+$("mgap").value});if(r.error||r.ok===false)say(plain(r.error||r.msg))};
+const STOP=()=>post("/api/stop");$("stop").onclick=STOP;
+$("restart").onclick=async()=>{if(!window.confirm("Restart the navigator? The rover stops and is disarmed; structures and P(life) results are cleared (calibration is kept)."))return;
+ const r=await post("/api/restart");if(r.error){say(r.error);return}say("Restarting… the console reloads in a few seconds.",true);
+ const t0=Date.now();const wait=async()=>{try{const q=await fetch("/api/state");if(q.ok&&Date.now()-t0>2500){location.reload();return}}catch(e){}setTimeout(wait,700)};setTimeout(wait,1500)};
+addEventListener("keydown",e=>{if(e.code==="Space"&&!/INPUT|TEXTAREA/.test(e.target.tagName)){e.preventDefault();STOP()}});
+$("rw").onchange=$("rl").onchange=$("mm").onchange=()=>post("/api/config",{rover_w_mm:+$("rw").value,rover_l_mm:+$("rl").value,margin_mm:+$("mm").value});
+$("recal").onclick=()=>post("/api/recal_ground");$("clrmap").onclick=()=>post("/api/clear_map");
+$("rec").onclick=()=>post("/api/record",{on:!(S&&S.recording)});
+$("night").onclick=()=>{document.body.classList.toggle("red");$("night").textContent=document.body.classList.contains("red")?"DAY MODE":"RED LIGHT"};
+</script></body></html>
