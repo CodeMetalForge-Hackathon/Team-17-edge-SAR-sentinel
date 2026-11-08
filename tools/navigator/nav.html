@@ -56,6 +56,11 @@ select{background:#0d1117;color:var(--tx);border:1px solid #30363d;border-radius
   <div id="mcount" style="font-weight:600"></div>
   <div id="mlist" style="font-size:13px"></div>
  </div>
+ <div class="pn"><h3>Scene changes (new / moved objects)</h3>
+  <div id="sstat" style="color:var(--mu);font-size:12px;min-height:16px"></div>
+  <div id="elist" style="font-size:13px;margin:6px 0"></div>
+  <pre id="supd" style="max-height:120px"></pre>
+ </div>
  <div class="pn"><h3>Tracking and timing</h3>
   <div class="row" id="chips"></div>
   <div class="row" id="timing"></div>
@@ -121,12 +126,16 @@ function ui(){
   [["rw",s.cfg.rover_w_mm],["rl",s.cfg.rover_l_mm],["mm",s.cfg.margin_mm]].forEach(([i,v])=>{if(document.activeElement!==$(i))$(i).value=v==null?"":v});
   $("clr").textContent="clearance radius "+s.cfg.radius.toFixed(3)+" + margin "+s.cfg.margin.toFixed(3)+" sandbox heights"+(hm?(" (sandbox height "+Math.round(hm)+" mm)"):"");
   const ms=s.mission;if(ms){const run=ms.state==="running";
-   $("mstart").disabled=!(n.armed&&!run&&n.state!=="running"&&s.pose&&ms.structures.length>0);$("mstart").textContent=run?"MISSION RUNNING...":"START MISSION (arm first)";
+   $("mstart").disabled=!(n.armed&&!run&&n.state!=="running"&&s.pose);$("mstart").textContent=run?"MISSION RUNNING...":"START MISSION (arm first)";
    $("mstat").textContent="mission: "+ms.state+(ms.message?" - "+ms.message:"")+"  ("+ms.structures.length+" structure"+(ms.structures.length==1?"":"s")+")";
    const act=ms.structures.find(x=>x.id===ms.active&&x.status==="collecting");
    $("mcount").textContent=act&&ms.countdown!=null?(act.label+" - Collecting — placeholder - "+Math.ceil(ms.countdown)+" s"):"";
    $("mlist").innerHTML=ms.structures.map(x=>"<div>"+x.label+": "+x.status_text+(x.reason?" ("+x.reason+")":"")+"</div>").join("");
-   if(document.activeElement!==$("mdw")&&run)$("mdw").value=ms.dwell_s;}
+   if(document.activeElement!==$("mdw")&&run)$("mdw").value=ms.dwell_s;
+   const sc=ms.scene||{};
+   $("sstat").textContent=sc.baseline?("baseline scene #"+sc.baseline.seq+" @"+sc.baseline.rx_time+" | "+sc.count+" updates, every "+sc.period_s+" s, longest gap "+(sc.max_interval_s||0)+" s, map age "+(sc.map_age_s==null?"-":sc.map_age_s)+" s"+(sc.fatal?" | "+sc.fatal:"")):"no scene baseline yet (captured at START MISSION)";
+   $("elist").innerHTML=(ms.events||[]).map(e=>"<div><b>"+e.label+"</b> "+e.text+": "+e.status_text+(e.reason?" ("+e.reason+")":"")+" <span style='color:var(--mu)'>scene "+e.evidence.scene_seq+" @"+e.evidence.scene_rx_time+", "+e.evidence.support+(e.interrupted?", interrupted x"+e.interrupted:"")+"</span> <a href='/api/event.jpg?id="+e.id+"' target='_blank' style='color:var(--ac)'>evidence</a></div>").join("")||"<span style='color:var(--mu)'>none detected</span>";
+   $("supd").textContent=(sc.updates||[]).slice().reverse().map(u=>"#"+u.n+" seq "+u.seq+" rx "+(u.rx_time||"-")+(u.interval_s!=null?" (+"+u.interval_s+" s)":"")+" "+(u.valid?"ok":"INVALID "+(u.why||u.status||""))+((u.new_events||[]).length?" NEW "+u.new_events.join(","):"")).join("\n");}
   $("log").textContent=s.log.join("\n");$("recn").textContent=s.recording?("recording "+s.recording.n+" frames"):"";$("rec").textContent=s.recording?"Stop recording":"Record depth+RGB";
 }
 async function poll(){

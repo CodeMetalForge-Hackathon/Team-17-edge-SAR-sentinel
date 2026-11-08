@@ -122,6 +122,8 @@ class Navigator:
         self.cruising = False
         self.run_info = {}
         self.stop_flag = threading.Event()
+        self.preempt = threading.Event()   # mission-only: a scene change interrupts this leg. NOT a STOP: the rover is halted, the
+                                           # executor ends, authorisation (armed) is untouched and the mission decides what is next
         self.thread = None
         self.lock = threading.Lock()
 
@@ -746,6 +748,12 @@ class Navigator:
             self._halt()
         finally:
             self.rover.stop()
+        if self.preempt.is_set() and self.armed and self.keep_armed:
+            # the mission interrupted this leg (scene change): whatever the executor stumbled over while being stopped is not a
+            # terminal failure; the mission re-observes the (stopped) rover itself and fails terminally if it cannot track it
+            self.state, self.reason, self.soft_failed = "idle", "interrupted: " + why, False
+            self._log("leg interrupted by the mission (%s)" % why)
+            return
         if soft and self.keep_armed and not self.stop_flag.is_set():
             self.state, self.reason, self.soft_failed = "failed", why, True
             self._log("FAILED (route-class; still armed for the mission): " + why)
@@ -985,10 +993,11 @@ class Navigator:
             except Exception:
                 pass
             self.p.map_frozen = False
-            if hasattr(self.src, "hold_full"):
-                self.src.hold_full = False
-            if hasattr(self.src, "full_period"):
-                self.src.full_period = getattr(self.src, "FULL_PERIOD_S", 60.0)
+            if not self.keep_armed:                  # a mission owns the frame schedule for its whole duration
+                if hasattr(self.src, "hold_full"):
+                    self.src.hold_full = False
+                if hasattr(self.src, "full_period"):
+                    self.src.full_period = getattr(self.src, "FULL_PERIOD_S", 8.0)
             if self.state == "running":
                 self.state, self.reason = "idle", "stopped"
             self.save_model()

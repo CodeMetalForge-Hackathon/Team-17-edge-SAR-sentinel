@@ -70,7 +70,7 @@ class App:
         last_full = -1
         while True:
             try:
-                if self.nav.state != "running":
+                if self.nav.state != "running" and not self.mission.running():     # a mission's scene monitor owns the map
                     fr = self.src.latest()
                     # The map is built from the latest FULL frame, looked up separately: a small rover-window frame usually
                     # arrives ~0.1 s after a full one, so keying on latest() alone missed full frames (an explicit refresh
@@ -104,9 +104,9 @@ class App:
                 time.sleep(1)
 
     def _map_due(self):
-        """Idle display: fold a full frame into the obstacle map at most about once a minute (not per frame)."""
+        """Idle display: fold a full frame into the obstacle map about every 8 s (not per frame); keeps map + display <= 10 s old."""
         now = time.time()
-        if now - getattr(self, "_map_t", 0.0) >= 55.0 or self.per.map_frames == 0:
+        if now - getattr(self, "_map_t", 0.0) >= 8.0 or self.per.map_frames == 0:
             self._map_t = now
             return True
         return False
@@ -248,15 +248,21 @@ class App:
         return self.view_jpg
 
     def live(self):
-        """Raw RGB with the boundary, route, target and rover drawn on it, in IMAGE pixel coordinates so a click maps
-        straight through the ground homography."""
+        """Raw RGB with the boundary, route, target, rover, structures and scene-change events drawn on it, in IMAGE pixel
+        coordinates so a click maps straight through the ground homography. The newest rover-window frame is composited onto
+        the last full scene, so the display keeps moving between the (slower) full-scene updates."""
         fr = self._full()
         if fr is None:
             return None
         n, c = self.nav, self.per.calib
-        key = (fr.seq, n.target, len(n.path), n.state, self.mission.overlay_key())
+        part = self.src.latest()
+        comp = part is not None and getattr(part, "partial", False) and part.seq > fr.seq and getattr(part, "roi", None)
+        key = (fr.seq, part.seq if comp else None, n.target, len(n.path), n.state, self.mission.overlay_key())
         if key != self.live_key:
             img = fr.bgr.copy()
+            if comp:
+                x0, y0, x1, y1 = part.roi
+                img[y0:y1, x0:x1] = part.bgr[y0:y1, x0:x1]
             if c.corners is not None:
                 cv2.polylines(img, [c.corners.astype(np.int32)], True, (0, 255, 0), 1)
             if c.H is not None:
@@ -270,12 +276,15 @@ class App:
                     cv2.line(img, (int(tp[0]) - 11, int(tp[1])), (int(tp[0]) + 11, int(tp[1])), (0, 255, 0), 1)
                     cv2.line(img, (int(tp[0]), int(tp[1]) - 11), (int(tp[0]), int(tp[1]) + 11), (0, 255, 0), 1)
             self._draw_structures(img)
+            self._draw_events(img)
             self.live_jpg = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 80])[1].tobytes()
             self.live_key = key
         return self.live_jpg
 
     COL = {"pending": (255, 255, 255), "visiting": (255, 200, 0), "collecting": (0, 200, 255), "complete": (0, 200, 0),
-           "unreachable": (0, 0, 255), "cancelled": (150, 150, 150), "failed": (0, 0, 255)}
+           "unreachable": (0, 0, 255), "cancelled": (150, 150, 150), "failed": (0, 0, 255), "gone": (120, 120, 120)}
+    EV_TEXT = {"pending": "QUEUED", "visiting": "GOING", "collecting": "INSPECTING", "complete": "INSPECTED", "unreachable": "UNREACHABLE",
+               "cancelled": "CANCELLED", "failed": "FAILED", "gone": "GONE"}
 
     def _draw_structures(self, img):
         """Structure labels + status on the live feed; the active visit gets the placeholder banner with the countdown.
@@ -284,6 +293,8 @@ class App:
         if c.H is None:
             return
         for s in list(m.book.items):
+            if s.gone and s.status == "gone":
+                continue
             col = self.COL.get(s.status, (255, 255, 255))
             x, y = [int(v) for v in c.to_px([(s.cx, s.cy)])[0]]
             cv2.circle(img, (x, y), 15, col, 2)
@@ -297,6 +308,51 @@ class App:
             (w, h), _ = cv2.getTextSize(t, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
             cv2.rectangle(img, (6, 6), (w + 18, h + 22), (0, 0, 0), -1)
             cv2.putText(img, t, (12, h + 12), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
+
+    def _draw_events(self, img):
+        """Scene-change events: label + status at the object's NEW position (a moved object also shows where it was), the
+        inspection banner with the placeholder countdown, a 'stopped' banner right after a detection, and the scene stamp."""
+        m, c = self.mission, self.per.calib
+        if c.H is None or m.state != "running":        # after a mission only the page's history panel keeps its events
+            return
+
+        def text(t, x, y, col, sc=0.5):
+            cv2.putText(img, t, (x, y), cv2.FONT_HERSHEY_SIMPLEX, sc, (0, 0, 0), 3)
+            cv2.putText(img, t, (x, y), cv2.FONT_HERSHEY_SIMPLEX, sc, col, 1)
+        for e in list(m.events.items):
+            pub = e.public(c)
+            if "px" not in pub:
+                continue
+            col = self.COL.get(e.status, (255, 255, 255))
+            x, y = [int(v) for v in pub["px"]]
+            if e.status in ("pending", "visiting", "collecting"):
+                col = (0, 215, 255) if e.status != "visiting" else (255, 200, 0)
+            if e.from_xy is not None and "from_px" in pub:
+                fx, fy = [int(v) for v in pub["from_px"]]
+                cv2.line(img, (fx, fy), (x, y), (180, 180, 180), 1, cv2.LINE_AA)
+                cv2.drawMarker(img, (fx, fy), (150, 150, 150), cv2.MARKER_TILTED_CROSS, 12, 1)
+                text("was here", fx - 22, fy + 18, (170, 170, 170), 0.4)
+            cv2.rectangle(img, (x - 18, y - 18), (x + 18, y + 18), col, 2)
+            text("%s %s - %s" % (e.label, e.text.upper(), self.EV_TEXT.get(e.status, e.status)), x - 20, y - 24, col)
+        act = next((e for e in m.events.items if e.label == m.active and e.status == "collecting"), None)
+        if act is not None and m.countdown is not None:
+            t = "%s %s - Collecting - placeholder - %d s" % (act.label, act.text.upper(), int(math.ceil(m.countdown)))
+            (w, h), _ = cv2.getTextSize(t, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
+            cv2.rectangle(img, (6, 6), (w + 18, h + 22), (0, 0, 0), -1)
+            cv2.putText(img, t, (12, h + 12), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 215, 255), 2)
+        if m.state == "running" and m._preempt.is_set():
+            t = "SCENE CHANGE: %s - rover stopped" % m.preempt_why
+            cv2.rectangle(img, (6, 40), (cv2.getTextSize(t, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0][0] + 18, 66), (0, 0, 120), -1)
+            cv2.putText(img, t, (12, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        mon = m.monitor
+        if mon is not None and mon.updates:
+            u = mon.updates[-1]
+            text("scene #%s seq %s rx %s  %s" % (u.get("n"), u.get("seq"), u.get("rx_time", "-"), "ok" if u.get("valid") else "INVALID"),
+                 8, img.shape[0] - 8, (200, 200, 200), 0.45)
+
+    def event_image(self, eid):
+        e = next((e for e in self.mission.events.items if e.id == eid), None)
+        return e.image if e is not None and e.image else None
 
     def camera(self):
         """Raw RGB beside a COLOURISED depth image (display only; numeric depth is never taken from this)."""
@@ -443,6 +499,15 @@ def make_handler(app):
                 return self._send(200, open(os.path.join(HERE, "nav.html"), "rb").read(), "text/html; charset=utf-8")
             if p == "/api/state":
                 return self._send(200, app.state())
+            if p == "/api/scene":                       # scene timestamps + event evidence (detection cadence can be checked from this)
+                return self._send(200, {"scene": app.mission.scene_info(), "events": [e.public(app.per.calib) for e in app.mission.events.items]})
+            if p == "/api/event.jpg":
+                try:
+                    q = dict(kv.split("=", 1) for kv in self.path.split("?", 1)[1].split("&"))
+                    b = app.event_image(int(q["id"]))
+                except Exception:
+                    b = None
+                return self._send(200, b, "image/jpeg") if b else self._send(404, {"error": "no such event image"})
             for name, fn in (("/api/view.jpg", app.view), ("/api/live.jpg", app.live), ("/api/camera.jpg", app.camera)):
                 if p == name:
                     b = fn()

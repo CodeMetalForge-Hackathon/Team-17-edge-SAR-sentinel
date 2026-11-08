@@ -3,6 +3,7 @@ sandbox with boundary markers, obstacles and a marked rover, and simulates the r
 The simulated rover's real motion conventions are hidden from the controller (they can be flipped/offset) so that the
 online motion-model learning is exercised."""
 import math
+import threading
 import time
 
 import cv2
@@ -37,6 +38,8 @@ class SimWorld:
         self.stale_stop_log = []
         self.diff, self.imu_sign, self.imu_bias = diff, imu_sign, imu_bias
         self.rover_holes = rover_holes           # the real rover's dark body returns NO depth (holes), as on the live camera
+        self._lock = threading.RLock()           # the scene monitor renders from its own thread
+        self.post = None                         # test hook: callable(frame) applied to every rendered frame (lighting, dropouts)
 
     def _hits(self, u, v, th):
         """True if the rover's actual footprint (150 x 110 mm rectangle along its heading) overlaps an obstacle."""
@@ -73,6 +76,10 @@ class SimWorld:
         img[mask > 128] = warp[mask > 128, None]
 
     def render(self):
+        with self._lock:
+            return self._render()
+
+    def _render(self):
         g = np.full((ROWS, COLS), 150, np.uint8)
         bgr = cv2.cvtColor(g, cv2.COLOR_GRAY2BGR)
         floor = self._poly([(0, 0), (W_MM, 0), (W_MM, H_MM), (0, H_MM)], 0)
@@ -119,6 +126,9 @@ class SimWorld:
         f.cols, f.rows = COLS, ROWS
         self.seq += 1
         f.seq, f.wall = self.seq, time.time()
+        f.rx = f.wall
+        if self.post is not None:
+            self.post(f)
         return f
 
     # ----- FrameSource interface
@@ -126,6 +136,10 @@ class SimWorld:
         return self.seq
 
     def wait_fresh(self, min_seq, timeout=5.0):
+        with self._lock:
+            return self._wait_fresh(min_seq)
+
+    def _wait_fresh(self, min_seq):
         new = max(self.seq + 1, min_seq)
         if self.driving is not None:            # streamed driving: the rover keeps moving between frames (5 fps)
             self.integrate(self.driving, (new - self.seq) * 0.2)
@@ -154,8 +168,16 @@ class SimWorld:
         f.rx = time.time()
         return f
 
+    def scene_frame(self):
+        """A fresh full frame of the CURRENT world (the scene monitor's source): does not advance a streamed drive."""
+        return self.render()
+
     # ----- rover dynamics (what the controller must discover)
     def apply(self, cmd, dur, speed=0.35, trim=0.0):
+        with self._lock:
+            return self._apply(cmd, dur, speed, trim)
+
+    def _apply(self, cmd, dur, speed=0.35, trim=0.0):
         if not self.responsive:
             self.seq += 3
             return

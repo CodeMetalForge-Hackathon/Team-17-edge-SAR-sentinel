@@ -61,7 +61,7 @@ class RemoteFrames:
     only). While a pose is being tracked only track frames are fetched; a full frame is fetched when there is no recent
     pose, on request (request_full), or about once a minute while idle (never during a run: the map is reused)."""
 
-    FULL_PERIOD_S = 60.0
+    FULL_PERIOD_S = 8.0               # idle: a full scene (display + map) at least this often (<= 10 s); tracking frames run in between
     IDLE_INTERVAL_S = 0.5
     ROI_HALF = 120                    # px half-width of the track window (rover ~70 px; < 1 observation of travel)
     HINT_MAX_AGE_S = 1.5

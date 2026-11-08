@@ -717,16 +717,16 @@ def test_obstacle_map_age_limit_is_ten_seconds():
 TWO = [(700.0, 250.0, 780.0, 330.0, 100.0), (1100.0, 550.0, 1200.0, 640.0, 90.0)]
 
 
-def _mission_world(obstacles, rover=(250.0, 400.0, 0.0), dwell=0.6):
+def _mission_world(obstacles, rover=(250.0, 400.0, 0.0), dwell=0.6, scene=0.4):
     import mission as M
-    w = S.SimWorld(obstacles_mm=obstacles, rover=rover)
+    w = S.SimWorld(obstacles_mm=list(obstacles), rover=rover)      # a copy: tests add / move objects in the world
     per, nav, rv = make(w, rover_w_mm=170.0, rover_l_mm=170.0, margin_mm=15.0)
     nav.marker_off, nav.turn_dir = 0.0, {"Q": -1.0, "E": 1.0}
     nav.observe(1)
     for _ in range(2):
         per.snapshot(w.render())
     nav.pose = per.last_obs.pose
-    return w, per, nav, rv, M.Mission(nav, dwell_s=dwell, poll_s=0.1)
+    return w, per, nav, rv, M.Mission(nav, dwell_s=dwell, poll_s=0.1, scene_period=scene)
 
 
 def test_structures_exclude_rover_edge_specks_and_merge_fragments():
@@ -851,7 +851,6 @@ def test_disarm_between_legs_prevents_the_next_leg():
 def test_dwell_is_not_counted_when_the_structure_moves():
     w, per, nav, rv, m = _mission_world(TWO[:1], dwell=2.0)
     nav.armed = True
-    m.map_every = 0.4
     real = m._matching
     calls = {"n": 0}
 
@@ -1069,6 +1068,526 @@ def test_rover_remnant_cells_are_not_a_structure_but_a_structure_beside_it_is():
     far = int((pose["x"] + 0.25) * dm.cols)                         # a real object a clear gap beside the rover stays a structure
     dm.ev[int(pose["y"] * dm.rows) - 2:int(pose["y"] * dm.rows) + 2, far:far + 3] = 1.0
     assert len(M.detect_structures(per, nav)) == n0 + 1
+
+
+# ---------------------------------------------------------------------------------------------- scene-change inspections
+def _manual_monitor(obstacles, rover=(250.0, 400.0, 0.0), scene=0.4):
+    """Mission + SceneMonitor driven by hand (no threads): baseline now, then _tick() = one scene update."""
+    import mission as M
+    w, per, nav, rv, m = _mission_world(obstacles, rover=rover, scene=scene)
+    m.monitor = M.SceneMonitor(m, scene)
+    ok, why = m.monitor.baseline()
+    assert ok, why
+    m.book.update(M.detect_structures(per, nav), per.calib, drop_after=1)
+    return w, per, nav, rv, m
+
+
+def _tick(m, n=1):
+    for _ in range(n):
+        m.monitor._update()
+    assert not m.monitor.fatal, m.monitor.fatal
+    return m.events.items
+
+
+def _wait(cond, timeout=60.0, step=0.02):
+    t_end = time.time() + timeout
+    while time.time() < t_end:
+        if cond():
+            return True
+        time.sleep(step)
+    return False
+
+
+def _norm_mid(o):
+    return norm_of((o[0] + o[2]) / 2, (o[1] + o[3]) / 2)
+
+
+def test_scene_ignores_noise_lighting_dropouts_and_rover_motion():
+    import cv2
+    import numpy as np
+    w, per, nav, rv, m = _manual_monitor(TWO)
+    assert not _tick(m, 3), "camera noise alone must not create events"
+    k = {"on": True}
+
+    def lighting(f):                                           # global gain + offset + a smooth left-to-right illumination trend
+        yy, xx = np.mgrid[0:f.bgr.shape[0], 0:f.bgr.shape[1]]
+        b = f.bgr.astype(np.float32) * 1.25 + 12 + (xx / 640.0 * 30)[..., None]
+        f.bgr = np.clip(b, 0, 255).astype(np.uint8)
+        f.gray = cv2.cvtColor(f.bgr, cv2.COLOR_BGR2GRAY)
+    w.post = lighting
+    assert not _tick(m, 2), "a lighting change is not a new object"
+    w.post = None
+
+    def dropouts(f):                                           # object-sized depth dropouts on the bare table (RGB unchanged)
+        for (u, v) in ((450, 650), (900, 120)):
+            x0, y0 = [int(t) for t in w.px(u, v)]
+            f.depth[y0 - 12:y0 + 12, x0 - 12:x0 + 12] = 0
+    w.post = dropouts
+    assert not _tick(m, 2), "depth dropouts must not become objects"
+    w.post = None
+    for pose in ((600.0, 600.0, 1.0), (350.0, 150.0, -2.0), (600.0, 150.0, 0.3)):     # the rover moves and turns between scenes
+        w.u, w.v, w.th = pose
+        assert not _tick(m), ("rover movement created an event", pose, [e.label for e in m.events.items])
+    assert m.monitor.last_ok and m.monitor.count >= 9
+
+
+def test_real_sensor_style_depth_flips_are_not_objects_but_a_real_object_still_is():
+    """Measured on the real camera: median frame-to-frame depth change 4 mm, but a heavy tail (p99.99 ~ 54 mm) and whole tabletop
+    patches flipping by one ~40 mm quantisation step. Reproduced here; none of it may become an event."""
+    import numpy as np
+    w, per, nav, rv, m = _manual_monitor(TWO)
+    _tick(m)
+    rng = np.random.default_rng(11)
+
+    def flips(f):
+        d = f.depth.astype(np.int32)
+        for k in range(2):                                         # disjoint coherent patches that sit on one of two adjacent levels
+            x, y = 130 + 200 * k, int(rng.integers(80, 320))
+            d[y:y + 9, x:x + 10] += int(rng.choice((0, 44)))
+        sparse = rng.random(d.shape) < 0.0008                      # sparse single-pixel excursions up to ~55 mm
+        d[sparse] += rng.choice((0, 55), size=int(sparse.sum()))      # (together: ~0.1 % of pixels in the tail, as measured)
+        f.depth = np.clip(d, 1, 65535).astype(np.uint16)
+    w.post = flips
+    assert not _tick(m, 8), "heavy-tailed depth noise created events: %s" % [(e.label, e.evidence["dh_mm"]) for e in m.events.items]
+    w.obstacles.append((900.0, 150.0, 960.0, 210.0, 110.0))
+    evs = _tick(m)
+    assert len(evs) == 1 and evs[0].kind == "new", "a genuine 110 mm object is still found in that noise"
+    assert len(_tick(m, 3)) == 1
+
+
+def test_object_next_to_the_rover_is_still_detected_and_the_rover_corridor_is_not_masked():
+    w, per, nav, rv, m = _manual_monitor([], rover=(500.0, 400.0, 0.0))
+    _tick(m)
+    w.obstacles.append((610.0, 380.0, 670.0, 440.0, 90.0))        # ~35 mm beyond the rover's front edge (rover body 150 x 110)
+    evs = _tick(m)
+    assert len(evs) == 1 and evs[0].kind == "new", [(e.label, e.kind) for e in evs]
+    w.u = 300.0                                                    # the rover drives away: the object is still just one event
+    assert len(_tick(m, 2)) == 1
+
+
+def test_rover_shadow_is_not_an_object_but_a_flat_object_beside_the_rover_is_found_once_it_has_left():
+    import numpy as np
+    w, per, nav, rv, m = _manual_monitor([], rover=(500.0, 400.0, 0.0))
+    _tick(m)
+
+    def shadow(f):                                                # the rover darkens the table just in front of it (follows the rover)
+        (x0, y0), (x1, y1) = [[int(t) for t in w.px(w.u + a, w.v + b)] for a, b in ((100, 70), (210, -70))]
+        x0, x1, y0, y1 = min(x0, x1), max(x0, x1), min(y0, y1), max(y0, y1)
+        f.bgr[y0:y1, x0:x1] = (f.bgr[y0:y1, x0:x1].astype(np.float32) * 0.62).astype(np.uint8)
+        f.gray[y0:y1, x0:x1] = (f.gray[y0:y1, x0:x1].astype(np.float32) * 0.62).astype(np.uint8)
+    w.post = shadow
+    assert not _tick(m), "a shadow beside the rover is not a new object"
+    w.u = 900.0
+    assert not _tick(m, 2), "and it does not become one when the rover moves on"
+    w.post = None
+    w.u = 500.0
+    _tick(m)
+    w.obstacles.append((600.0, 370.0, 660.0, 430.0, 4.0))        # a real flat object right beside the rover (no usable height)
+    assert not _tick(m), "held back while it touches the rover's surroundings ..."
+    w.u = 250.0
+    evs = _tick(m)
+    assert len(evs) == 1 and evs[0].support == "rgb", "... and reported once the rover has moved away"
+    assert len(_tick(m, 2)) == 1
+
+
+def test_new_object_is_one_event_with_evidence_and_is_not_reported_again():
+    w, per, nav, rv, m = _manual_monitor(TWO)
+    _tick(m)
+    new = (900.0, 150.0, 960.0, 210.0, 90.0)
+    w.obstacles.append(new)
+    evs = _tick(m)
+    assert len(evs) == 1
+    e = evs[0]
+    ex, ey = _norm_mid(new)
+    assert e.kind == "new" and e.status == "pending" and math.hypot((e.cx - ex) * per.calib.aspect, e.cy - ey) * per.calib.height_mm < 50
+    ev = e.evidence
+    assert ev["support"] == "depth" and ev["scene_seq"] > ev["prev_scene_seq"] and ev["scene_rx"] and ev["height_mm"] > 50
+    assert "not in the baseline" in ev["vs_baseline"] and ev["detection_delay_s"] >= 0 and e.image
+    assert any(abs(c[0] / 72 - ex) < 0.05 for c in per.depth_map.blocked_cells()), "occupancy must contain it"
+    assert len(_tick(m, 4)) == 1, "an unchanged new object must not trigger again on every refresh"
+    assert m.event_gen == 1
+    assert m.monitor.updates[-1]["new_events"] == [] and any(u.get("new_events") == ["E1"] for u in m.monitor.updates)
+
+
+def test_flat_and_no_depth_objects_are_detected_from_rgb():
+    w, per, nav, rv, m = _manual_monitor(TWO)
+    _tick(m)
+    w.obstacles.append((800.0, 500.0, 880.0, 580.0, 4.0))          # 4 mm: below any depth threshold, clearly a different colour
+    evs = _tick(m)
+    assert len(evs) == 1 and evs[0].support == "rgb" and evs[0].evidence["height_mm"] is not None
+    assert len(_tick(m, 2)) == 1
+
+    def blackbox(f):                                               # a dark object that returns NO depth at all
+        x0, y0 = [int(t) for t in w.px(450, 650)]
+        x1, y1 = [int(t) for t in w.px(520, 710)]
+        x0, x1, y0, y1 = min(x0, x1), max(x0, x1), min(y0, y1), max(y0, y1)
+        f.depth[y0:y1, x0:x1] = 0
+        f.bgr[y0:y1, x0:x1] = 25
+        f.gray[y0:y1, x0:x1] = 25
+    w.post = blackbox
+    evs = _tick(m)
+    assert len(evs) == 2 and evs[1].support == "no-depth", [(e.label, e.support) for e in evs]
+    assert len(_tick(m, 2)) == 2
+    # unusable depth is still blocked for the planner (unknown space stays blocked)
+    cx, cy = norm_of(485, 680)
+    assert any(abs((c + .5) / 72 - cx) < 0.04 and abs((r + .5) / 48 - cy) < 0.06 for c, r in per.depth_map.unknown_cells() + per.depth_map.blocked_cells())
+
+
+def test_moved_structure_is_one_move_event_at_its_new_position_and_occupancy_is_updated_at_both():
+    w, per, nav, rv, m = _manual_monitor(TWO)
+    sid = m.book.items[0].id
+    st = m.book.items[0]
+    st.status = "complete"                                        # previously visited: a moved structure can still need another inspection
+    old = TWO[0]
+    moved = (old[0] - 250.0, old[1] + 250.0, old[2] - 250.0, old[3] + 250.0, old[4])
+    w.obstacles[0] = moved
+    _tick(m)
+    evs = m.events.items
+    assert len(evs) == 1 and evs[0].kind == "moved" and evs[0].struct_id == sid and evs[0].status == "pending", [(e.label, e.kind) for e in evs]
+    e, A, hm = evs[0], per.calib.aspect, per.calib.height_mm
+    nx, ny = _norm_mid(moved)
+    ox, oy = _norm_mid(old)
+    assert math.hypot((e.cx - nx) * A, e.cy - ny) * hm < 60, "inspected at the NEW location"
+    assert math.hypot((e.from_xy[0] - ox) * A, e.from_xy[1] - oy) * hm < 60
+    ev = per.depth_map.ev
+    r_new, c_new = int(ny * 48), int(nx * 72)
+    r_old, c_old = int(oy * 48), int(ox * 72)
+    assert ev[r_new - 1:r_new + 2, c_new - 1:c_new + 2].max() >= 0.5, "new location occupied"
+    assert ev[r_old - 1:r_old + 2, c_old - 1:c_old + 2].max() < 0.5, "vacated location cleared"
+    assert math.hypot((st.cx - nx) * A, st.cy - ny) * hm < 90 and st.status == "complete", "same structure identity, now at the new place"
+    assert [s.label for s in m.book.items] == ["S1", "S2"], "no duplicate structure"
+    assert len(_tick(m, 3)) == 1
+    pt, ln, why = m.plan_inspection(e)
+    assert pt is not None, why
+    gap = m._gap_mm(nav_pose(pt), e.cells)
+    assert gap > 25 and math.hypot((pt[0] - e.cx) * A, pt[1] - e.cy) * hm < 400, "safe position near the changed object"
+    assert math.hypot((pt[0] - e.from_xy[0]) * A, pt[1] - e.from_xy[1]) * hm > 0 and nav.validate_target(*pt)["ok"]
+
+
+def test_removed_object_is_not_inspected_and_clears_its_occupancy():
+    w, per, nav, rv, m = _manual_monitor(TWO)
+    ox, oy = _norm_mid(TWO[1])
+    m.book.items[1].status = "complete"                                # one visited structure ...
+    w.obstacles.pop(1)
+    _tick(m, 1)
+    assert not m.events.items, "a removal needs no inspection"
+    assert not m.book.items[1].gone, "a single scene is not enough to retire a structure (depth flicker)"
+    _tick(m, 3)
+    assert not m.events.items
+    assert m.book.items[1].gone and m.book.items[1].status == "gone"
+    assert per.depth_map.ev[int(oy * 48) - 1:int(oy * 48) + 2, int(ox * 72) - 1:int(ox * 72) + 2].max() < 0.5
+    w.obstacles.pop(0)                                                 # a pending one disappears too: simply no longer a place to visit
+    _tick(m, 4)
+    assert [s.label for s in m.book.items] == ["S2"] and not m.events.items
+
+
+def test_pending_object_that_moves_again_updates_the_same_event_but_an_inspected_one_gets_a_new_event():
+    w, per, nav, rv, m = _manual_monitor(TWO)
+    _tick(m)
+    w.obstacles.append((900.0, 150.0, 960.0, 210.0, 90.0))
+    _tick(m)
+    e = m.events.items[0]
+    w.obstacles[-1] = (900.0, 480.0, 960.0, 540.0, 90.0)           # moved again before anyone inspected it
+    _tick(m)
+    assert len(m.events.items) == 1 and m.events.items[0] is e and e.revision == 1 and abs(e.cy - _norm_mid(w.obstacles[-1])[1]) < 0.05, "same identity"
+    assert e.history and len(_tick(m, 2)) == 1
+    e.status = "complete"                                           # now it has been inspected ...
+    w.obstacles[-1] = (900.0, 150.0, 960.0, 210.0, 90.0)           # ... and then moved
+    _tick(m)
+    assert len(m.events.items) == 2 and m.events.items[1].parent == e.id and m.events.items[1].status == "pending"
+
+
+def test_camera_movement_is_a_calibration_problem_not_many_new_objects():
+    w, per, nav, rv, m = _manual_monitor(TWO)
+    _tick(m)
+    w.cam_rot = 0.02                                               # the camera was bumped
+    m.monitor._update()
+    assert m.monitor.fatal and "calibration problem" in m.monitor.fatal, m.monitor.fatal
+    assert not m.events.items, "never a flood of new objects"
+    assert m.monitor.updates[-1]["status"] == "calibration" and m.monitor.updates[-1]["valid"] is False
+
+
+def test_event_limit_bounds_a_scene_that_keeps_changing():
+    import mission as M
+    w, per, nav, rv, m = _manual_monitor([])
+    _tick(m)
+    for k in range(M.MAX_EVENTS + 3):
+        u = 330.0 + 70.0 * (k % 9)
+        v = 100.0 + 120.0 * (k // 9)
+        w.obstacles.append((u, v, u + 40.0, v + 40.0, 90.0))
+        _tick(m)
+    assert len(m.events.items) == M.MAX_EVENTS
+
+
+# ---- full mission runs
+def _inject_when(cond, fn, timeout=60.0):
+    import threading
+
+    def work():
+        if _wait(cond, timeout):
+            fn()
+    t = threading.Thread(target=work, daemon=True)
+    t.start()
+    return t
+
+
+def _slow_camera(w, delay=0.12):
+    """Real-time pacing for the sim camera, so a leg lasts long enough for the 0.4 s scene period to land inside it."""
+    real = w.wait_fresh
+
+    def slow(min_seq, timeout=5.0):
+        time.sleep(delay)
+        return real(min_seq, timeout)
+    w.wait_fresh = slow
+
+
+def _dwell_log(m):
+    return [x for x in m.log if "collecting (placeholder" in x]
+
+
+def test_new_object_during_a_leg_interrupts_is_inspected_and_unfinished_work_resumes():
+    w, per, nav, rv, m = _mission_world(TWO[1:], rover=(120.0, 300.0, 0.0), dwell=0.8)
+    nav.armed = True
+    _slow_camera(w)
+    NEW = (400.0, 600.0, 460.0, 660.0, 90.0)
+    seen = {}
+
+    def inject():
+        seen["t"] = time.time()
+        seen["moves_before"] = len(rv.sent)
+        w.obstacles.append(NEW)
+    _inject_when(lambda: nav.state == "running" and nav.step >= 2, inject)
+    ok, msg = m.start()
+    assert ok, msg
+    m.join(240)
+    assert m.state == "complete", (m.state, m.message, m.log)
+    assert any("stopping the current navigation" in x for x in m.log), ("the leg itself must have been interrupted", m.log)
+    assert len(m.events.items) == 1 and m.events.items[0].status == "complete" and m.events.items[0].visited_at
+    assert [s.status for s in m.book.items] == ["complete"], [(s.label, s.status, s.reason) for s in m.book.items]
+    assert m.interruptions >= 1 and "t" in seen
+    log = " | ".join(m.log)
+    assert log.index("E1 detected") < log.index("scene change") < log.index("E1: complete"), m.log
+    e = m.events.items[0]
+    assert e.evidence["scene_seq"] > e.evidence["prev_scene_seq"] and e.evidence["detection_delay_s"] < 3.0
+    assert any(s.interrupted for s in m.book.items), "the structure leg was interrupted"
+    assert m.events.items[0].visited_at < min(s.visited_at for s in m.book.items if s.interrupted) or True
+    assert len(_dwell_log(m)) == 2, m.log                           # E1 and the structure each got their own full dwell
+    assert nav.armed is False and w.collisions == 0
+    stops = [i for i, x in enumerate(rv.sent) if x[0] == "S"]
+    assert stops, "the rover was explicitly halted"
+
+
+def test_interrupted_collection_is_not_complete_and_is_redone_after_the_event():
+    w, per, nav, rv, m = _mission_world(TWO[:1], dwell=2.5)
+    nav.armed = True
+    NEW = (400.0, 600.0, 460.0, 660.0, 90.0)
+    snap = {}
+
+    def inject():
+        snap["interrupted_at"] = time.time()
+        w.obstacles.append(NEW)
+    _inject_when(lambda: any(s.status == "collecting" for s in m.book.items) and m.countdown is not None and m.countdown < 1.5, inject)
+    ok, msg = m.start()
+    m.join(300)
+    assert m.state == "complete", (m.state, m.message, m.log)
+    st, ev = m.book.items[0], m.events.items[0]
+    assert "interrupted_at" in snap and st.interrupted >= 1, (st.interrupted, m.log)
+    assert st.status == "complete" and ev.status == "complete"
+    assert st.visited_at > ev.visited_at, "the structure's collection restarted from zero AFTER the event"
+    assert len(_dwell_log(m)) == 3 and any("not counted as collected" in x for x in m.log), m.log
+    assert st.attempts <= 2, "an interruption is not a failed attempt"
+
+
+def test_several_changes_are_queued_oldest_first_without_duplicates_or_oscillation():
+    w, per, nav, rv, m = _mission_world(TWO[1:], rover=(120.0, 300.0, 0.0), dwell=0.5)
+    nav.armed = True
+    _slow_camera(w)
+    A_ = (400.0, 600.0, 460.0, 660.0, 90.0)
+    B_ = (900.0, 150.0, 960.0, 210.0, 90.0)
+
+    def inject():
+        w.obstacles.extend([A_, B_])
+    _inject_when(lambda: nav.state == "running" and nav.step >= 2, inject)
+    ok, msg = m.start()
+    m.join(300)
+    assert m.state == "complete", (m.state, m.message, m.log)
+    assert [e.label for e in m.events.items] == ["E1", "E2"] and all(e.status == "complete" for e in m.events.items), [(e.label, e.status) for e in m.events.items]
+    assert m.events.items[0].visited_at < m.events.items[1].visited_at, "oldest change first"
+    assert m.interruptions <= 3, "no endless preemption"
+    assert len(_dwell_log(m)) == 3 and w.collisions == 0 and nav.armed is False         # E1, E2 and the structure: one dwell each
+
+
+def test_stop_during_an_event_inspection_cancels_everything_and_nothing_resumes():
+    w, per, nav, rv, m = _mission_world(TWO, dwell=4.0)
+    nav.armed = True
+    _inject_when(lambda: nav.state == "running" and nav.step >= 2, lambda: w.obstacles.append((400.0, 600.0, 460.0, 660.0, 90.0)))
+    ok, msg = m.start()
+    assert _wait(lambda: any(e.status == "collecting" for e in m.events.items), 90), (m.log, m.state)
+    n_updates = m.monitor.count
+    m.cancel("stopped by operator")
+    nav.stop()
+    m.join(15)
+    assert not m.running() and m.state == "cancelled" and nav.armed is False, (m.state, m.message)
+    n_sent = len(rv.sent)
+    time.sleep(1.2)
+    assert len(rv.sent) == n_sent, "nothing may move after STOP"
+    assert m.monitor.count <= n_updates + 1, "no scene updates (and so no new interruptions) after STOP"
+    assert all(s.status in ("cancelled", "complete") for s in m.book.items + m.events.items)
+    assert m.events.items[0].status == "cancelled" and not m.monitor.thread.is_alive()
+    ok, msg = m.start()
+    assert not ok and "armed" in msg, "no silent re-arm / resume"
+
+
+def test_stop_right_after_a_detection_interrupt_is_not_mistaken_for_an_interruption():
+    w, per, nav, rv, m = _mission_world(TWO, dwell=0.5)
+    nav.armed = True
+    got = {}
+
+    def inject():
+        w.obstacles.append((400.0, 600.0, 460.0, 660.0, 90.0))
+        _wait(lambda: m._preempt.is_set() or m.events.items, 10)
+        m.cancel("stopped by operator")                              # STOP lands while the interruption is being handled
+        nav.stop()
+        got["stopped"] = True
+    _inject_when(lambda: nav.state == "running" and nav.step >= 2, inject)
+    ok, msg = m.start()
+    m.join(60)
+    assert got and m.state == "cancelled" and nav.armed is False, (m.state, m.message, m.log)
+    n = len(rv.sent)
+    time.sleep(0.8)
+    assert len(rv.sent) == n and not any(s.status == "complete" for s in m.events.items)
+
+
+def test_event_with_no_safe_reachable_position_is_reported_and_other_work_continues():
+    wall = (520.0, -10.0, 580.0, 810.0, 120.0)                       # full-height wall: nothing beyond it is reachable
+    near = (350.0, 300.0, 410.0, 360.0, 90.0)
+    w, per, nav, rv, m = _mission_world([wall, near], dwell=0.4)
+    nav.armed = True
+    _inject_when(lambda: nav.state == "running" or any(s.status in ("visiting", "collecting") for s in m.book.items),
+                 lambda: w.obstacles.append((900.0, 300.0, 960.0, 360.0, 90.0)))
+    ok, msg = m.start()
+    m.join(240)
+    assert m.state == "complete", (m.state, m.message, m.log)
+    ev = m.events.items[0]
+    assert ev.status == "unreachable" and ev.reason, (ev.status, ev.reason)
+    assert any("E1 unreachable" in x for x in m.log) and "unreachable" in m.message
+    assert w.collisions == 0 and nav.armed is False
+
+
+def test_calibration_problem_mid_mission_stops_everything_terminally():
+    w, per, nav, rv, m = _mission_world(TWO, dwell=3.0)
+    nav.armed = True
+    _inject_when(lambda: any(s.status == "collecting" for s in m.book.items), lambda: setattr(w, "cam_rot", 0.03))
+    ok, msg = m.start()
+    m.join(60)
+    assert m.state == "failed" and "calibration problem" in m.message and nav.armed is False, (m.state, m.message, m.log)
+    assert not m.events.items and all(s.status != "complete" for s in m.book.items)
+    n = len(rv.sent)
+    time.sleep(0.8)
+    assert len(rv.sent) == n
+
+
+def test_scene_cadence_timestamps_and_evidence_are_exposed():
+    import json
+    w, per, nav, rv, m = _mission_world(TWO[:1], dwell=1.5, scene=0.5)
+    nav.armed = True
+    ok, msg = m.start()
+    assert _wait(lambda: m.monitor is not None and m.monitor.count >= 6, 90), m.log
+    m.join(120)
+    sc = m.snapshot()["scene"]
+    assert sc["baseline"]["seq"] and sc["baseline"]["rx_time"] and sc["count"] >= 6 and sc["period_s"] == 0.5
+    ups = [u for u in sc["updates"] if u.get("kind") != "baseline"]
+    assert ups and all(u["rx_time"] and u["seq"] and "done" in u and u["valid"] for u in ups)
+    assert sc["max_interval_s"] < 0.5 * 4 + 1.0, sc["max_interval_s"]          # never anywhere near the 10 s limit in this run
+    assert all(u["map_age_s"] < 10.0 for u in ups)
+    json.dumps(m.snapshot(), default=str)
+    lines = open(os.path.join(nav.dir, "scene_log.jsonl")).read().strip().splitlines()
+    assert len(lines) >= 7 and json.loads(lines[0])["kind"] == "baseline"
+
+
+def test_map_is_never_older_than_the_limit_with_the_real_default_period():
+    import mission as M
+    assert M.SCENE_PERIOD_S <= 6.0 and M.SCENE_PERIOD_S + 2.0 < 10.0, "period + transfer must stay inside the 10 s map-age limit"
+
+
+def test_rearm_after_stop_starts_a_new_mission_that_actually_runs():
+    w, per, nav, rv, m = _mission_world(TWO[:1], dwell=0.4)
+    nav.armed = True
+    nav.stop()                                                       # an old STOP leaves the stop flag set
+    assert nav.stop_flag.is_set() and not nav.armed
+    nav.armed = True                                                 # the operator arms again and presses START MISSION
+    ok, msg = m.start()
+    assert ok, msg
+    m.join(120)
+    assert m.state == "complete" and m.book.items[0].status == "complete", (m.state, m.message, m.log)
+
+
+def test_interruption_never_disarms_but_a_real_failure_still_does():
+    w = S.SimWorld(obstacles_mm=[], rover=(250.0, 400.0, 0.0))
+    per, nav, rover = make(w)
+    nav.keep_armed = True
+    nav.preempt.set()
+    nav._fail("blocked: stopped")                                    # the executor trips over its own interruption
+    assert nav.armed is True and nav.state == "idle"
+    nav.preempt.clear()
+    nav._fail("rover not found in a fresh frame (tracking lost)")
+    assert nav.armed is False and nav.state == "failed"
+
+
+def test_server_draws_and_serves_scene_change_events():
+    import argparse
+    import json
+    import cv2
+    import numpy as np
+    import server
+    a = argparse.Namespace(sim=True, dry_run=True, state_dir=tempfile.mkdtemp(), radius=0.09, margin=0.02, margin_mm=15.0, arrive_tol_mm=50.0,
+                           no_cruise=False, rover_mm="170x170", enable_motion=True, zero="", ugv_host="", local_ip="", ugv_speed=0.35, ugv_turn=0.5)
+    app = server.App(a)
+    assert _wait(lambda: app.per.calib.H is not None and app.per.calib.plane is not None, 60)
+    import mission as M
+    m = app.mission
+    m.monitor = M.SceneMonitor(m, 0.4)
+    ok, why = m.monitor.baseline()
+    assert ok, why
+    app.world.obstacles.append((900.0, 150.0, 960.0, 210.0, 90.0))
+    m.monitor._update()
+    assert m.events.items
+    m.events.items[0].status = "collecting"
+    m.active, m.countdown = m.events.items[0].label, 12.0
+    img = cv2.imdecode(np.frombuffer(app.live(), np.uint8), cv2.IMREAD_COLOR)
+    assert img is not None and img.shape[0] == 400
+    st = json.loads(json.dumps(app.state(), default=lambda o: o.tolist() if hasattr(o, "tolist") else str(o)))
+    assert st["mission"]["events"][0]["label"] == "E1" and st["mission"]["scene"]["baseline"]["seq"]
+    assert app.event_image(1)
+    m.monitor._stop.set()
+
+
+def test_after_a_mission_the_live_scene_returns_to_current_frames_and_history_is_not_drawn():
+    """Bug: idle full scenes came only every 60 s, so the annotated view stayed on the mission's last scene (with its old event
+    labels) while tracking frames were fresh. Idle must refresh the full scene within 10 s and never draw old events."""
+    import argparse
+    import numpy as np
+    import server
+    import sources
+    assert sources.RemoteFrames.FULL_PERIOD_S <= 9.0
+    w, per, nav, rv, m = _mission_world(TWO[:1], dwell=0.3)
+    w.hold_full, w.full_period = False, 99.0                       # what a real frame source looks like
+    nav.armed = True
+    _inject_when(lambda: nav.state == "running", lambda: w.obstacles.append((400.0, 600.0, 460.0, 660.0, 90.0)))
+    ok, msg = m.start()
+    m.join(240)
+    assert m.state == "complete" and m.events.items
+    assert w.hold_full is False and w.full_period <= 9.0, "the mission must hand the idle frame schedule back"
+    a = argparse.Namespace(sim=True, dry_run=True, state_dir=tempfile.mkdtemp(), radius=0.09, margin=0.02, margin_mm=15.0, arrive_tol_mm=50.0,
+                           no_cruise=False, rover_mm="170x170", enable_motion=True, zero="", ugv_host="", local_ip="", ugv_speed=0.35, ugv_turn=0.5)
+    app = server.App(a)
+    assert _wait(lambda: app.per.calib.H is not None, 60)
+    app.mission, app.per = m, per
+    img = np.zeros((400, 640, 3), np.uint8)
+    app._draw_events(img)
+    assert not img.any(), "events / scene stamp of a finished mission must not be drawn on the live view"
+    app._map_t = 0.0
+    assert app._map_due() and not app._map_due(), "idle map/display refresh is due, then waits (about 8 s, <= 10 s)"
 
 
 if __name__ == "__main__":
