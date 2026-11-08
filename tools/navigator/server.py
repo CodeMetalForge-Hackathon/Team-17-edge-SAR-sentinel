@@ -40,13 +40,19 @@ class App:
             self.sim_dir = self.dir
         else:
             from sources import RemoteFrames
-            import rover_control as rc
             self.src = RemoteFrames(a.zero)
-            rover = rc.RoverLink(dry_run=a.dry_run)
+            if a.rover == "ugv":
+                from ugv import UgvLink
+                rover = UgvLink(a.ugv_host, a.local_ip, a.ugv_speed, a.ugv_turn, dry_run=a.dry_run)
+            else:
+                import rover_control as rc
+                rover = rc.RoverLink(dry_run=a.dry_run)
         self.rover = rover
         cfg = {"radius": a.radius, "margin": a.margin, "margin_mm": a.margin_mm}
         if a.rover_mm:
             cfg["rover_w_mm"], cfg["rover_l_mm"] = [float(x) for x in a.rover_mm.lower().split("x")]
+        if a.rover == "ugv" and not a.sim:
+            cfg["fwd_burst"] = 0.5
         self.nav = C.Navigator(self.per, self.src, rover, self.dir, cfg)
         self.motion_enabled = a.enable_motion
         self.dry = a.dry_run or a.sim
@@ -104,7 +110,7 @@ class App:
                       "plane": c.plane is not None, "aspect": round(c.aspect, 3), "aspect_measured": c.aspect_measured,
                       "plane_d_mm": None if c.plane is None else round(c.plane[1], 1)},
             "markers": sorted(per.last_markers.keys()), "manual_markers": sorted(per.manual_markers.keys()),
-            "pose": pose,
+            "pose": pose, "heading": (n.imu or {}), "pose_source": (pose or {}).get("source"),
             "target": n.target,
             "path": [list(p) for p in (n.path if n.state == "running" else (res["waypoints"] if res else []))],
             "plan_error": (res or {}).get("error", ""),
@@ -276,6 +282,11 @@ if __name__ == "__main__":
     ap.add_argument("--enable-motion", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--sim", action="store_true")
+    ap.add_argument("--rover", choices=("ugv", "m5"), default="ugv", help="ugv: Waveshare UGV01 over HTTP; m5: RoverC UDP")
+    ap.add_argument("--ugv-host", default="192.168.4.1")
+    ap.add_argument("--local-ip", default="192.168.4.2")
+    ap.add_argument("--ugv-speed", type=float, default=0.35)
+    ap.add_argument("--ugv-turn", type=float, default=0.5)
     ap.add_argument("--radius", type=float, default=0.09, help="rover enclosing radius, sandbox-height units")
     ap.add_argument("--margin", type=float, default=0.02)
     ap.add_argument("--rover-mm", default=None, help="rover footprint WxL in mm, e.g. 200x170")

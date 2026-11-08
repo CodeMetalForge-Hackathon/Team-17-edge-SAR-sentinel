@@ -193,10 +193,16 @@ def clearance_sets(obstacles_norm, cols, rows, L, W, margin, aspect):
     return bx, by, bt
 
 
-def plan_oriented(pos, target, obstacles_norm, cols, rows, L, W, margin, aspect, turn_cost=10):
+def plan_oriented(pos, target, obstacles_norm, cols, rows, L, W, margin, aspect, turn_cost=10, fixed=False):
+    """fixed=True: the rover keeps a fixed world orientation (mecanum strafing, no turns): one AABB footprint
+    (L along x, W along y) for every move and a small direction-change cost."""
     sc = cell_of(pos[0], pos[1], cols, rows)
     tc = cell_of(target[0], target[1], cols, rows)
-    bx, by, bt = clearance_sets(obstacles_norm, cols, rows, L, W, margin, aspect)
+    if fixed:
+        bx = rect_blocked(obstacles_norm, cols, rows, L / 2 + margin, W / 2 + margin, aspect)
+        by, bt, turn_cost = bx, bx, 2
+    else:
+        bx, by, bt = clearance_sets(obstacles_norm, cols, rows, L, W, margin, aspect)
     res = {"blocked": bx | by, "blocked_x": bx, "blocked_y": by, "blocked_turn": bt, "cells": [], "waypoints": [],
            "error": "", "clearance": (L, W, margin)}
     if tc in bx and tc in by:

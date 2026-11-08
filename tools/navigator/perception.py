@@ -30,7 +30,11 @@ class Perception:
         self.last_markers = {}
         self.last_obs = None
         self.map_frames = 0
-        self.dims_hist = []          # recent (L, W) rover extents in mm measured from depth
+        self.allow_blob = True      # depth-blob pose when the rover marker is unreadable (labelled in the UI)
+        self.last_pose = None
+        self.dims_hist = []
+        self.aabb_hist = []          # recent world-aligned blob extents (wx, wy) in mm
+          # recent (L, W) rover extents in mm measured from depth
         self.lock = threading.RLock()
         self._load()
 
@@ -88,6 +92,12 @@ class Perception:
                 c.set_corners(corners)
                 self.save()
             elif c.drifted(corners):
+                if self.manual_markers:                     # a static hand-placed marker is invalid once the camera moves
+                    self.manual_markers = {}
+                    try:
+                        os.remove(self._p("manual_markers.json"))
+                    except OSError:
+                        pass
                 self.warnings = ["camera or markers moved: boundary updated, ground plane will be refit, depth map cleared"]
                 c.set_corners(corners)
                 c.plane, c.aspect_measured, c.height_mm = None, False, None
@@ -96,10 +106,19 @@ class Perception:
         if c.corners is not None and (c.plane is None or self.want_ground_refit):
             self._fit_ground(frame)
         pose = V.rover_pose(markers, c, frame.depth) if c.H is not None else None
+        if pose is not None:
+            pose["source"] = "marker"
+        elif c.H is not None and c.plane is not None and self.allow_blob:
+            near = (self.last_pose["x"], self.last_pose["y"]) if self.last_pose else None
+            pose = V.blob_pose(frame.depth, c, near=near)
+        if pose is not None:
+            self.last_pose = pose
+            if pose.get("source") == "depth-blob":
+                self.aabb_hist = (self.aabb_hist + [tuple(pose["dims_mm"])])[-9:]
         if update_map and c.plane is not None and c.H is not None and frame.depth is not None:
             used = self.depth_map.update(frame.depth, c, rover=pose, rover_exclude=self._rover_exclude())
             self.map_frames += 1
-        if pose is not None and c.plane is not None and frame.depth is not None:
+        if pose is not None and pose.get("theta") is not None and c.plane is not None and frame.depth is not None:
             self._measure_rover(frame, pose)
         self.last_markers = markers
         self.last_obs = Obs(frame, markers, pose, live)
@@ -170,6 +189,12 @@ class Perception:
         if dims and hm:
             return math.hypot(*dims) / 2 / hm + 0.03
         return 0.22
+
+    def rover_aabb_mm(self):
+        if len(self.aabb_hist) < 3:
+            return None
+        a = np.array(self.aabb_hist)
+        return float(np.median(a[:, 0])), float(np.median(a[:, 1]))
 
     def rover_dims_mm(self):
         if len(self.dims_hist) < 3:

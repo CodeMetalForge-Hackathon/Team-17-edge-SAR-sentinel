@@ -61,12 +61,18 @@ class Navigator:
     def __init__(self, perception, source, rover, store_dir, cfg=None, now=time.time):
         self.p, self.src, self.rover = perception, source, rover
         self.dir = store_dir
-        self.cfg = {"cols": 120, "rows": 40, "radius": 0.07, "margin": 0.02, "max_steps": 90, "max_seconds": 240,
-                    "fwd_burst": 0.30, "no_progress": 8,
+        self.cfg = {"cols": 120, "rows": 40, "radius": 0.07, "margin": 0.02, "max_steps": 160, "max_seconds": 600,
+                    "fwd_burst": 0.30, "no_progress": 10,
                     # physical rover size / clearance (mm); converted with the measured sandbox height when known
                     "rover_w_mm": None, "rover_l_mm": None, "margin_mm": None}
         self.cfg.update(cfg or {})
         self.model = MotionModel()
+        self.holonomic = False        # True while the pose has no heading (depth-blob tracking): strafe, never turn
+        self.probe_disp = {}
+        self.turn_dir = None          # {'Q': +-1, 'E': +-1}: heading change (CCW +) per rotation burst, IMU mode
+        self.turn_bad = 0
+        self.imu = None               # {'sign': +-1, 'offset': rad}: world heading = sign*IMU_yaw + offset
+        self.hv = {}                  # learned WORLD-frame velocity (square-frame units/s) per command F/B/L/R
         self.now = now
         try:
             self.model.load(json.load(open(os.path.join(store_dir, "model.json"))))
@@ -102,6 +108,10 @@ class Navigator:
         rover (once its marker pose is known), else the configured mm size, else the dimensionless fallback."""
         c, cal = self.cfg, self.p.calib
         hm = cal.height_mm
+        if self.holonomic and hm:
+            a = self.p.rover_aabb_mm()
+            if a:
+                return a[0] / hm, a[1] / hm, (c["margin_mm"] or 0) / hm
         dims = self.p.rover_dims_mm()
         if hm and dims:
             L, W = dims
@@ -124,13 +134,95 @@ class Navigator:
         c = self.cfg
         L, W, m = self.footprint()
         return geom.plan_oriented(pos, self.target, self.p.obstacle_rects(near=pos), c["cols"], c["rows"], L, W, m,
-                                  self.p.calib.aspect)
+                                  self.p.calib.aspect, fixed=self.holonomic)
 
     def preview(self):
         """Plan from the last known pose for display (no motion)."""
         if self.target is None or not self.pose:
             return None
         return self.make_plan((self.pose["x"], self.pose["y"]))
+
+    # ---- heading from the controller's IMU when no marker is readable (differential-drive rover)
+    def _yaw_rad(self):
+        f = getattr(self.rover, "yaw_deg", None)
+        if f is None:
+            return None
+        try:
+            y = f()
+        except Exception:
+            return None
+        return None if y is None else math.radians(y)
+
+    def _apply_heading(self, obs):
+        p = obs.pose
+        if p is None or p.get("theta") is not None or self.imu is None:
+            return
+        y = self._yaw_rad()
+        if y is None:
+            obs.pose = None                      # heading source lost: treat as lost tracking
+            return
+        p["theta"] = geom.wrap(self.imu["sign"] * y + self.imu["offset"])
+        p["source"] = "depth-blob + IMU heading"
+
+    def _burst_and_observe(self, cmd, dur):
+        self.rover.move(cmd, dur)
+        return self.observe(self.src.current_seq() + 2)
+
+    def calibrate_heading(self):
+        """Bounded probes that tie the IMU yaw to the camera frame: F, turn, F. Returns '' on success else the reason."""
+        A = self.p.calib.aspect
+        self._log("heading calibration: forward / turn / forward probes")
+        o0 = self.observe(self.src.current_seq() + 1)
+        if o0 is None or o0.pose is None:
+            return "no pose for heading calibration"
+        p0 = o0.pose
+
+        def forward(pb):
+            for dur in (0.25, 0.45):
+                o = self._burst_and_observe("F", dur)
+                if o is None or o.pose is None:
+                    return None, None, None, "pose lost during the forward probe"
+                d = ((o.pose["x"] - pb["x"]) * A, o.pose["y"] - pb["y"])
+                if math.hypot(*d) >= 0.012:
+                    return o, d, dur, ""
+                pb = o.pose
+            return None, None, None, "rover did not move on the forward probes (no measurable displacement)"
+        o1, d1, dur1, why = forward(p0)
+        if why:
+            return why
+        phi1, y1 = math.atan2(d1[1], d1[0]), self._yaw_rad()
+        self.model.observe_move("F", dur1, math.hypot(*d1), 0.0)
+        dpsi, dur_t = 0.0, 0.35
+        for dur_t in (0.08, 0.12, 0.2):
+            o2 = self._burst_and_observe("Q", dur_t)
+            y2 = self._yaw_rad()
+            if o2 is None or o2.pose is None:
+                o2 = self.observe(self.src.current_seq() + 2)          # one retry for a missed blob frame
+            if o2 is None or o2.pose is None:
+                return "rover position lost after the turn probe (burst %.2fs)" % dur_t
+            if y1 is None or y2 is None:
+                return "IMU yaw unavailable (before=%s after=%s)" % (y1, y2)
+            dpsi = geom.wrap(y2 - y1)
+            if abs(dpsi) >= 0.06:
+                break
+            y1 = y2
+        if abs(dpsi) < 0.06:
+            return "IMU yaw did not change during the turn probe"
+        o3, d3, dur3, why = forward(o2.pose)
+        if why:
+            return why
+        phi2, y3 = math.atan2(d3[1], d3[0]), self._yaw_rad()
+        dphi = geom.wrap(phi2 - phi1)
+        sign = 1.0 if dphi * dpsi > 0 else -1.0
+        if abs(abs(dphi) - abs(dpsi)) > max(0.35, 0.5 * abs(dpsi)):
+            self._log("WARNING: camera-measured turn %.0f deg vs IMU %.0f deg disagree" % (math.degrees(dphi), math.degrees(dpsi)))
+        self.imu = {"sign": sign, "offset": geom.wrap(phi2 - sign * y3)}
+        self.model.observe_turn("Q", dur_t, sign * dpsi)
+        self.turn_dir = {"Q": 1.0 if sign * dpsi > 0 else -1.0, "E": -1.0 if sign * dpsi > 0 else 1.0}
+        self.turn_bad = 0
+        self._log("heading calibrated: IMU sign %+d, offset %.0f deg; Q turns %.0f deg/s, F moves %.3f/s"
+                  % (sign, math.degrees(self.imu["offset"]), math.degrees(sign * dpsi / dur_t), math.hypot(*d1) / dur1))
+        return ""
 
     # ---- fresh, settled observation
     def observe(self, min_seq, timeout=6.0):
@@ -142,6 +234,7 @@ class Navigator:
             if fr is None:
                 continue
             obs = self.p.process(fr)
+            self._apply_heading(obs)
             seq = fr.seq + 1
             tries += 1
             if obs.pose is None:
@@ -151,7 +244,7 @@ class Navigator:
                 continue
             if prev is not None:
                 dp = math.hypot((obs.pose["x"] - prev["x"]) * self.p.calib.aspect, obs.pose["y"] - prev["y"])
-                dt = abs(geom.wrap(obs.pose["theta"] - prev["theta"]))
+                dt = 0.0 if obs.pose.get("theta") is None or prev.get("theta") is None else abs(geom.wrap(obs.pose["theta"] - prev["theta"]))
                 if dp < SETTLE_POS and dt < SETTLE_ANG:
                     return obs
             prev = obs.pose
@@ -196,10 +289,24 @@ class Navigator:
         self.p.save()
 
     def _run(self):
+        try:
+            self._run_inner()
+        except Exception as e:   # never leave the rover in an undefined state: STOP, disarm, report
+            import traceback
+            self._log("internal error: " + traceback.format_exc().splitlines()[-1])
+            self._fail("internal error: %s" % e)
+
+    def _run_inner(self):
         c = self.cfg
         t0 = self.now()
         self._log("run started; reacquiring pose")
         obs = self.observe(self.src.current_seq() + 1)
+        if obs is not None and obs.pose is not None and obs.pose.get("theta") is None and getattr(self.rover, "yaw_deg", None) is not None:
+            self.imu = None
+            why = self.calibrate_heading()
+            if why:
+                return self._fail("heading calibration failed: " + why)
+            obs = self.observe(self.src.current_seq() + 1)
         best_rem, bad_dist, last_cmd, turns_in_row = None, 0, None, 0
         self.remaining = None
         pending = None   # (cmd, dur, pose_before) awaiting its effect measurement
@@ -209,6 +316,7 @@ class Navigator:
                     return self._fail("rover marker not found in a fresh frame (pose lost)")
                 pose = obs.pose
                 self.pose = pose
+                self.holonomic = pose.get("theta") is None
                 if not pose["inside"]:
                     return self._fail("rover is outside the sandbox boundary")
                 # learn from the previous burst
@@ -237,7 +345,7 @@ class Navigator:
                 # no-progress watchdog on the REMAINING ROUTE LENGTH (the route may first lead away from the target)
                 rem = geom.path_length_sq(res["waypoints"], self.p.calib.aspect)
                 self.remaining = rem
-                if last_cmd in ("F", "B", "L", "R"):
+                if last_cmd in ("F", "B", "L", "R") and not (self.holonomic and len(self.hv) < 2):
                     if best_rem is not None and rem > best_rem - 0.004:
                         bad_dist += 1
                     else:
@@ -248,14 +356,16 @@ class Navigator:
                     return self._fail("no progress along the route for %d translation bursts" % bad_dist)
                 if turns_in_row >= 12:
                     return self._fail("cannot align the heading (12 rotation bursts without reaching it)")
-                cmd, dur = self._choose(pose, res["waypoints"])
+                cmd, dur = (self._choose_holo(pose, res["waypoints"]) if self.holonomic else self._choose(pose, res["waypoints"]))
+                if cmd is None:
+                    return self._fail(dur)
                 # safety (margin 0, the rover's true footprint): a translation burst must stay clear for the footprint
                 # at the current heading; a large rotation must not sweep the enclosing circle into an obstacle
                 why = self._unsafe(pose, cmd, dur)
                 if why:
                     return self._fail(why)
                 self.step += 1
-                self._log("step %d: %s %.2fs  dist=%.3f  heading=%.0f deg" % (self.step, cmd, dur, self.dist, math.degrees(pose["theta"])))
+                self._log("step %d: %s %.2fs  dist=%.3f  %s" % (self.step, cmd, dur, self.dist, "heading=%.0f deg" % math.degrees(pose["theta"]) if pose.get("theta") is not None else "position-only (" + pose.get("source", "?") + ")"))
                 if self.stop_flag.is_set() or not self.armed:
                     break
                 try:
@@ -298,6 +408,18 @@ class Navigator:
         obs = self.p.obstacle_rects(near=pos)
         bt = geom.planning_blocked(obs, c["cols"], c["rows"], math.hypot(L, W) / 2, A)
         here = geom.cell_of(pos[0], pos[1], c["cols"], c["rows"])
+        if self.holonomic:
+            v = self.hv.get(cmd)
+            if not v:
+                return ""
+            nu, nv = pose["x"] * A + v[0] * dur, pose["y"] + v[1] * dur
+            cell = geom.cell_of(nu / A, nv, c["cols"], c["rows"])
+            hm = self.p.calib.height_mm or 700.0
+            a = self.p.rover_aabb_mm() or (200.0, 200.0)
+            blk = geom.rect_blocked(obs, c["cols"], c["rows"], 0.7 * a[0] / 2 / hm, 0.7 * a[1] / 2 / hm, A)   # light contact tolerated
+            if cell in blk and cell != here:
+                return "next burst would bring the rover footprint into an obstacle or the table edge"
+            return ""
         th = pose["theta"]
         if cmd in ("F", "B"):
             vf, vl = self.model.v[cmd]
@@ -337,14 +459,20 @@ class Navigator:
             best, ang_off, speed = "F", 0.0, 0.02
         err = geom.wrap(want - (pose["theta"] + ang_off))
         if abs(err) > ANG_TOL:
+            if self.turn_dir is not None:
+                # skid-steer rover: rotation response is non-linear (dead time, ramp), so use fixed pulses and let the
+                # fresh pose/heading decide the next one instead of trusting a rate model
+                cmd = "Q" if self.turn_dir["Q"] * err > 0 else "E"
+                dur = 0.5 if abs(err) > 0.7 else (0.35 if abs(err) > 0.4 else 0.22)
+                return cmd, dur
             # rotate: choose the command whose learned yaw rate has the sign of err
             cand = [(cmd, r) for cmd, r in self.model.w.items() if r * err > 0]
             if not cand:
                 cand = [max(self.model.w.items(), key=lambda kv: abs(kv[1]))]
             cmd, rate = max(cand, key=lambda kv: abs(kv[1]))
-            dur = min(0.30, max(0.10, 0.8 * abs(err) / max(abs(rate), 1e-3)))
+            dur = min(0.30, max(0.05, 0.8 * abs(err) / max(abs(rate), 1e-3)))
             if self.model.n[cmd] == 0:
-                dur = 0.12   # first use: small probe burst
+                dur = 0.08   # first use: small probe burst
             return cmd, round(dur, 2)
         sp = max(speed, 0.02)
         dur = min(self.cfg["fwd_burst"], max(0.12, 0.8 * min(dist, 0.15) / sp))
@@ -352,8 +480,68 @@ class Navigator:
             dur = 0.15       # first use: small probe burst
         return best, round(dur, 2)
 
-    def _learn(self, cmd, dur, pb, pa):
+    def _choose_holo(self, pose, wps):
+        """Position-only control for a mecanum rover: learn each command's world-frame velocity from observed
+        displacement; probe F then L when unknown; then pick the command best aligned with the aim direction."""
         A = self.p.calib.aspect
+        pos = (pose["x"], pose["y"])
+        aim, _ = self._aim(pos, wps)
+        s = ((aim[0] - pos[0]) * A, aim[1] - pos[1])
+        for probe in ("F", "L"):
+            if probe not in self.hv:
+                return probe, 0.15
+        if all(self.probe_disp.get(k, 1.0) < 0.006 for k in ("F", "L")):
+            return None, "rover did not respond to the F and L probes (no measurable displacement)"
+        n = math.hypot(*s) or 1e-9
+        best, score = None, 0.0
+        for cmd, v in self.hv.items():
+            sp = math.hypot(*v)
+            if sp < 1e-3:
+                continue
+            cosang = (v[0] * s[0] + v[1] * s[1]) / (sp * n)
+            if cosang * sp > score:
+                best, score = cmd, cosang * sp
+        if best is None or score <= 0:
+            return None, "rover did not respond to the F and L probes (no measurable displacement)"
+        sp = math.hypot(*self.hv[best])
+        dur = min(self.cfg["fwd_burst"], max(0.12, 0.8 * min(n, 0.12) / max(score, 0.02)))
+        return best, round(dur, 2)
+
+    def _learn_holo(self, cmd, dur, pb, pa):
+        A = self.p.calib.aspect
+        d = ((pa["x"] - pb["x"]) * A / dur, (pa["y"] - pb["y"]) / dur)
+        self.probe_disp.setdefault(cmd, math.hypot(*d) * dur)
+        old = self.hv.get(cmd)
+        self.hv[cmd] = d if old is None else (0.5 * old[0] + 0.5 * d[0], 0.5 * old[1] + 0.5 * d[1])
+        opp = {"F": "B", "B": "F", "L": "R", "R": "L"}[cmd]
+        if opp not in self.hv:
+            self.hv[opp] = (-self.hv[cmd][0], -self.hv[cmd][1])
+        if math.hypot(*d) * dur < 0.004:
+            self._log("WARNING: %s %.2fs produced no measurable displacement (%.4f)" % (cmd, dur, math.hypot(*d) * dur))
+
+    def _learn(self, cmd, dur, pb, pa):
+        if self.holonomic:
+            return self._learn_holo(cmd, dur, pb, pa)
+        A = self.p.calib.aspect
+        if self.imu is not None and cmd in ("Q", "E") and self.turn_dir is not None and pb.get("theta") is not None and pa.get("theta") is not None:
+            dth = geom.wrap(pa["theta"] - pb["theta"])
+            if abs(dth) > 0.08 and abs(dth) < 1.2:
+                self.turn_bad = self.turn_bad + 1 if dth * self.turn_dir[cmd] < 0 else 0
+                if self.turn_bad >= 2:                      # the IMU says this command turns the other way: swap
+                    self.turn_dir = {k: -v for k, v in self.turn_dir.items()}
+                    self.turn_bad = 0
+                    self._log("rotation direction corrected (Q/E swapped)")
+            return
+        if self.imu is not None and cmd in ("F", "B") and pb.get("theta") is not None:
+            d = ((pa["x"] - pb["x"]) * A, pa["y"] - pb["y"])
+            if math.hypot(*d) >= 0.02:                      # camera displacement direction is the heading truth: re-anchor
+                phi = math.atan2(d[1], d[0]) + (math.pi if cmd == "B" else 0.0)
+                y = self._yaw_rad()
+                if y is not None:
+                    new_off = geom.wrap(phi - self.imu["sign"] * y)
+                    if abs(geom.wrap(new_off - self.imu["offset"])) > 0.5:
+                        self._log("heading re-anchored by %.0f deg from the camera displacement" % math.degrees(geom.wrap(new_off - self.imu["offset"])))
+                    self.imu["offset"] = new_off
         if cmd in ("Q", "E"):
             self.model.observe_turn(cmd, dur, geom.wrap(pa["theta"] - pb["theta"]))
         else:

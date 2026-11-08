@@ -116,6 +116,43 @@ def test_corridor_over_tall_block_with_measured_footprint():
     assert max(v for _c, _d, (_u, v, _t) in w.log) > 520
 
 
+def test_markerless_depth_blob_strafing_reaches_target():
+    """No readable rover marker: position from the depth blob, motion learned from displacement, no heading needed."""
+    w = S.SimWorld(obstacles_mm=WALL, rover=(250.0, 400.0, 0.35), marker=False, fwd_offset=0.0)
+    per, nav, rover = make(w, margin_mm=10.0)
+    obs = nav.observe(1)
+    assert obs.pose and obs.pose["source"] == "depth-blob" and obs.pose["theta"] is None
+    nx, ny = norm_of(900.0, 400.0)
+    run(nav, (nx, ny))
+    assert nav.state == "done", (nav.state, nav.reason, nav.log[-6:])
+    assert w.collisions == 0
+    assert any(c in ("L", "R") for c, _ in rover.sent) or any(c in ("F", "B") for c, _ in rover.sent)
+
+
+def test_unresponsive_rover_stops_with_diagnosis():
+    w = S.SimWorld(obstacles_mm=[], rover=(250.0, 400.0, 0.0), marker=False, responsive=False)
+    per, nav, rover = make(w, margin_mm=10.0)
+    nav.observe(1)
+    nx, ny = norm_of(900.0, 400.0)
+    run(nav, (nx, ny))
+    assert nav.state == "failed" and "did not respond" in nav.reason, (nav.state, nav.reason)
+    assert len([c for c, _ in rover.sent if c != "S"]) <= 4          # bounded probing, then it stops
+
+
+def test_differential_rover_heading_from_imu_without_marker():
+    """UGV-style rover: no readable marker, position from the depth blob, heading from the controller IMU whose sign
+    and offset are unknown and are calibrated by forward/turn/forward probes."""
+    for sign, bias in ((-1, 0.9), (1, -2.0)):
+        w = S.SimWorld(obstacles_mm=WALL, rover=(250.0, 400.0, 0.5), marker=False, diff=True, imu_sign=sign, imu_bias=bias)
+        per, nav, rover = make(w, margin_mm=10.0)
+        nav.observe(1)
+        nx, ny = norm_of(900.0, 400.0)
+        run(nav, (nx, ny))
+        assert nav.state == "done", (sign, nav.state, nav.reason, nav.log[-6:])
+        assert nav.imu["sign"] == sign
+        assert w.collisions == 0
+
+
 def test_no_route_fails_safely():
     wall = [(520.0, -10.0, 580.0, 810.0, 120.0)]  # full barrier
     w = S.SimWorld(obstacles_mm=wall, rover=(250.0, 400.0, 0.0))
@@ -135,6 +172,7 @@ def test_lost_marker_stops():
     def hide():
         f = orig()
         f.gray[:] = 150                              # blank frame: nothing detectable
+        f.depth[:] = 0
         return f
     w.render = hide
     run(nav, (0.85, 0.5))

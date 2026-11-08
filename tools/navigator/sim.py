@@ -22,7 +22,7 @@ class SimFrame:
 
 class SimWorld:
     def __init__(self, obstacles_mm=None, rover=(300.0, 250.0, 0.4), cam_rot=0.0, rot_sign=-1, fwd_offset=0.0,
-                 fwd_speed=140.0, rot_rate=math.radians(55), noise=True, seed=3):
+                 fwd_speed=140.0, rot_rate=math.radians(55), noise=True, seed=3, marker=True, responsive=True, diff=False, imu_sign=-1, imu_bias=0.9):
         self.obstacles = obstacles_mm or []      # (u0,v0,u1,v1,height_mm)
         self.u, self.v, self.th = rover
         self.cam_rot, self.rot_sign, self.fwd_offset = cam_rot, rot_sign, fwd_offset
@@ -32,6 +32,8 @@ class SimWorld:
         self.seq = 0
         self.log = []                            # (cmd, dur, true pose after)
         self.collisions = 0
+        self.marker, self.responsive = marker, responsive
+        self.diff, self.imu_sign, self.imu_bias = diff, imu_sign, imu_bias
 
     # ----- projection: sandbox mm (u right, v up) + height -> pixel
     def px(self, u, v, h=0.0):
@@ -82,7 +84,8 @@ class SimWorld:
         mk = []
         for lu, lv in ((half, half), (half, -half), (-half, -half), (-half, half)):   # TL,TR,BR,BL: 'up' edge = front
             mk.append((self.u + c * lu - sn * lv, self.v + sn * lu + c * lv))
-        self._marker(bgr, ID_ROVER, mk, 82)
+        if self.marker:
+            self._marker(bgr, ID_ROVER, mk, 82)
         if self.noise:
             depth += self.rng.normal(0, 3, depth.shape)
             depth[self.rng.random(depth.shape) < 0.04] = 0
@@ -110,6 +113,9 @@ class SimWorld:
 
     # ----- rover dynamics (what the controller must discover)
     def apply(self, cmd, dur):
+        if not self.responsive:
+            self.seq += 3
+            return
         rate = self.rot_rate * (1 + self.rng.normal(0, 0.12))
         sp = self.fwd_speed * (1 + self.rng.normal(0, 0.12))
         ang = self.th + self.fwd_offset
@@ -119,6 +125,9 @@ class SimWorld:
             self.th += self.rot_sign * rate * dur
         elif cmd == "E":
             self.th -= self.rot_sign * rate * dur
+        elif self.diff and cmd in ("L", "R"):
+            self.seq += 3
+            return
         else:
             vx, vy = {"F": fwd, "B": (-fwd[0], -fwd[1]), "L": left, "R": (-left[0], -left[1])}[cmd]
             nu, nv = self.u + vx * sp * dur, self.v + vy * sp * dur
@@ -136,6 +145,8 @@ class SimRover:
 
     def __init__(self, world):
         self.world, self.sent = world, []
+        if world.diff:
+            self.yaw_deg = self._yaw
 
     def move(self, cmd, dur):
         self.sent.append((cmd, dur))
@@ -144,6 +155,10 @@ class SimRover:
     def stop(self, repeats=3):
         self.sent.append(("S", 0))
         return True
+
+    def _yaw(self):
+        w = self.world
+        return math.degrees(w.imu_sign * w.th + w.imu_bias)
 
     def close(self):
         pass

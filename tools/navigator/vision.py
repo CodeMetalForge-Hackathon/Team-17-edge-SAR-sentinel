@@ -12,7 +12,7 @@ import numpy as np
 from geom import wrap
 
 ID_BL, ID_TL, ID_BR, ID_TR = 0, 1, 2, 3
-ID_ROVER = 4
+ID_ROVER = 5
 DICT = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
 _DET = cv2.aruco.ArucoDetector(DICT, cv2.aruco.DetectorParameters())
 
@@ -236,6 +236,8 @@ class ObstacleMap:
         z = depth[ys, xs].astype(np.float64)
         ok = z > 0
         ys, xs, z = ys[ok], xs[ok], z[ok]
+        if len(z) == 0:
+            return 0
         fx, fy, cx, cy = K
         P = np.stack([(xs - cx) * z / fx, (ys - cy) * z / fy, z], 1)
         h = d - P @ n
@@ -313,3 +315,59 @@ def flatten_view(bgr, calib, out_w=720):
     dst = np.array([[0, out_h], [out_w, out_h], [out_w, 0], [0, 0]], np.float32)  # BL,BR,TR,TL with y up -> image rows down
     M = cv2.getPerspectiveTransform(calib.corners.astype(np.float32), dst)
     return cv2.warpPerspective(bgr, M, (out_w, out_h), flags=cv2.INTER_LINEAR)
+
+
+def blob_pose(depth, calib, near=None, near_r=0.3, expect_mm=(200.0, 170.0)):
+    """Position-only rover pose from depth: the raised blob (40..135 mm above the floor plane) of rover size, not
+    touching taller obstacles. Used when the rover marker is not readable. Returns pose dict (theta None) with the
+    world-aligned footprint extents in mm, or None. `near` (x, y) restricts to the blob closest to the last pose."""
+    if calib.plane is None or calib.H is None or calib.K is None or calib.height_mm is None:
+        return None
+    fx, fy, cx, cy = calib.K
+    n, d = calib.plane
+    Hh, Ww = depth.shape
+    ys, xs = np.mgrid[0:Hh, 0:Ww]
+    z = depth.astype(np.float32)
+    X, Y = (xs - cx) * z / fx, (ys - cy) * z / fy
+    h = d - (X * n[0] + Y * n[1] + z * n[2])
+    valid = z > 0
+    quad = np.zeros((Hh, Ww), np.uint8)
+    cv2.fillConvexPoly(quad, calib.corners.astype(np.int32), 1)
+    quad = quad.astype(bool)
+    mid = valid & quad & (h > 40) & (h < 135)
+    tall = cv2.dilate((valid & (h >= 135)).astype(np.uint8), np.ones((9, 9), np.uint8)).astype(bool)
+    mid = cv2.morphologyEx(mid.astype(np.uint8), cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    nlab, lab, stats, _ = cv2.connectedComponentsWithStats(mid, connectivity=8)
+    best, best_score = None, 1e9
+    for i in range(1, nlab):
+        area = stats[i, cv2.CC_STAT_AREA]
+        if area < 300:
+            continue
+        m = lab == i
+        if (m & tall).sum() > 0.05 * area:
+            continue                                   # a fringe of a taller obstacle, not the rover
+        py, px = np.nonzero(m)
+        P = np.stack([X[py, px], Y[py, px], z[py, px]], 1).astype(np.float64)
+        hh = h[py, px].astype(np.float64)
+        Pf = P + n[None, :] * hh[:, None]
+        fpx = np.stack([fx * Pf[:, 0] / Pf[:, 2] + cx, fy * Pf[:, 1] / Pf[:, 2] + cy], 1)
+        nr = calib.to_norm(fpx)
+        u = nr[:, 0] * calib.aspect * calib.height_mm
+        v = nr[:, 1] * calib.height_mm
+        wx = float(np.percentile(u, 98) - np.percentile(u, 2))
+        wy = float(np.percentile(v, 98) - np.percentile(v, 2))
+        if not (90 <= wx <= 340 and 90 <= wy <= 340):
+            continue
+        cxn, cyn = float(nr[:, 0].mean()), float(nr[:, 1].mean())
+        if near is not None:
+            dist = math.hypot((cxn - near[0]) * calib.aspect, cyn - near[1])
+            if dist > near_r:
+                continue
+            score = dist
+        else:
+            score = abs(wx - expect_mm[0]) + abs(wy - expect_mm[1]) + abs(float(np.median(hh)) - 80)
+        if score < best_score:
+            best_score = score
+            best = {"x": cxn, "y": cyn, "theta": None, "source": "depth-blob", "dims_mm": [wx, wy],
+                    "px": [float(px.mean()), float(py.mean())], "inside": True, "height_mm": float(np.median(hh))}
+    return best
