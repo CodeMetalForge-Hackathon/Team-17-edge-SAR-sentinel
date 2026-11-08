@@ -33,7 +33,20 @@ class SimWorld:
         self.log = []                            # (cmd, dur, true pose after)
         self.collisions = 0
         self.marker, self.responsive = marker, responsive
+        self.driving = None            # (left, right) wheel command being streamed
+        self.stale_stop_log = []
         self.diff, self.imu_sign, self.imu_bias = diff, imu_sign, imu_bias
+
+    def _hits(self, u, v, th):
+        """True if the rover's actual footprint (150 x 110 mm rectangle along its heading) overlaps an obstacle."""
+        c, sn = math.cos(th), math.sin(th)
+        pts = [(a, b) for a in (-75, -37, 0, 37, 75) for b in (-55, 0, 55)]
+        for o in self.obstacles:
+            for a, b in pts:
+                pu, pv = u + c * a - sn * b, v + sn * a + c * b
+                if o[0] < pu < o[2] and o[1] < pv < o[3]:
+                    return True
+        return False
 
     # ----- projection: sandbox mm (u right, v up) + height -> pixel
     def px(self, u, v, h=0.0):
@@ -73,13 +86,14 @@ class SimWorld:
             cv2.fillConvexPoly(bgr, poly.astype(np.int32), (60, 60, 200))
             cv2.fillConvexPoly(depth, poly.astype(np.int32), float(Z0 - hh))
         # rover body 110 x 150 (front = +heading), height 80, with a 60 mm marker on top whose up edge faces front
-        c, sn = math.cos(self.th), math.sin(self.th)
+        c, sn = math.cos(self.th + self.fwd_offset), math.sin(self.th + self.fwd_offset)
         body = []
         for lu, lv in ((-75, -55), (75, -55), (75, 55), (-75, 55)):        # body frame (fwd, left)
             body.append((self.u + c * lu - sn * lv, self.v + sn * lu + c * lv))
         poly = self._poly(body, 80)
         cv2.fillConvexPoly(bgr, poly.astype(np.int32), (40, 160, 220))
         cv2.fillConvexPoly(depth, poly.astype(np.int32), float(Z0 - 80))
+        c, sn = math.cos(self.th), math.sin(self.th)
         half = 40
         mk = []
         for lu, lv in ((half, half), (half, -half), (-half, -half), (-half, half)):   # TL,TR,BR,BL: 'up' edge = front
@@ -105,19 +119,36 @@ class SimWorld:
         return self.seq
 
     def wait_fresh(self, min_seq, timeout=5.0):
-        self.seq = max(self.seq, min_seq - 1)
+        new = max(self.seq + 1, min_seq)
+        if self.driving is not None:            # streamed driving: the rover keeps moving between frames (5 fps)
+            self.integrate(self.driving, (new - self.seq) * 0.2)
+        self.seq = new - 1
         return self.render()
+
+    def integrate(self, lr, dt):
+        l, r = lr
+        v = self.fwd_speed * ((l + r) / 2) / 0.35
+        w = self.rot_sign * self.rot_rate * (r - l)
+        steps = max(1, int(dt / 0.05))
+        for _ in range(steps):
+            h = dt / steps
+            self.th += w * h
+            self.u += math.cos(self.th + self.fwd_offset) * v * h
+            self.v += math.sin(self.th + self.fwd_offset) * v * h
+            if self._hits(self.u, self.v, self.th + self.fwd_offset):
+                self.collisions += 1
+        self.th = (self.th + math.pi) % (2 * math.pi) - math.pi
 
     def latest(self):
         return self.render()
 
     # ----- rover dynamics (what the controller must discover)
-    def apply(self, cmd, dur):
+    def apply(self, cmd, dur, speed=0.35, trim=0.0):
         if not self.responsive:
             self.seq += 3
             return
         rate = self.rot_rate * (1 + self.rng.normal(0, 0.12))
-        sp = self.fwd_speed * (1 + self.rng.normal(0, 0.12))
+        sp = self.fwd_speed * (1 + self.rng.normal(0, 0.12)) * (speed / 0.35)
         ang = self.th + self.fwd_offset
         fwd = (math.cos(ang), math.sin(ang))
         left = (-math.sin(ang), math.cos(ang))
@@ -129,9 +160,10 @@ class SimWorld:
             self.seq += 3
             return
         else:
+            self.th += self.rot_sign * self.rot_rate * (2 * trim * speed / 0.35) * dur * (1 if cmd == "F" else -1)
             vx, vy = {"F": fwd, "B": (-fwd[0], -fwd[1]), "L": left, "R": (-left[0], -left[1])}[cmd]
             nu, nv = self.u + vx * sp * dur, self.v + vy * sp * dur
-            if any(o[0] - 70 < nu < o[2] + 70 and o[1] - 70 < nv < o[3] + 70 for o in self.obstacles):
+            if self._hits(nu, nv, self.th + self.fwd_offset):
                 self.collisions += 1
             self.u, self.v = nu, nv
         self.th = (self.th + math.pi) % (2 * math.pi) - math.pi
@@ -140,19 +172,42 @@ class SimWorld:
 
 
 class SimRover:
-    """Drop-in for RoverLink.move/stop that drives a SimWorld."""
+    """Drop-in for UgvLink: move / turn_by / drive / halt / stop / yaw_deg driving a SimWorld."""
     dry_run = True
 
     def __init__(self, world):
         self.world, self.sent = world, []
-        if world.diff:
-            self.yaw_deg = self._yaw
+        self.yaw_deg = self._yaw if world.diff else None
+        self.speed = 0.35
 
-    def move(self, cmd, dur):
+    def move(self, cmd, dur, speed=None, trim=0.0):
+        self.halt()
         self.sent.append((cmd, dur))
-        self.world.apply(cmd, dur)
+        self.world.apply(cmd, dur, speed or self.speed, trim)
+
+    def turn_by(self, cmd, target_rad):
+        """IMU-closed turn: rotates by about the target (+-10 %), sign by the rover's real (hidden) convention."""
+        self.halt()
+        w = self.world
+        got = target_rad * (1 + w.rng.normal(0, 0.10))
+        w.th += (w.rot_sign if cmd == "Q" else -w.rot_sign) * got
+        w.th = (w.th + math.pi) % (2 * math.pi) - math.pi
+        self.sent.append((cmd, got))
+        w.seq += 3
+        return got
+
+    def drive(self, left, right, ttl=0.9):
+        self.sent.append(("DRIVE", (round(left, 3), round(right, 3))))
+        self.world.driving = (left, right)
+
+    def halt(self):
+        if self.world.driving is not None:
+            self.world.driving = None
+            self.sent.append(("S", 0))
+        return True
 
     def stop(self, repeats=3):
+        self.world.driving = None
         self.sent.append(("S", 0))
         return True
 

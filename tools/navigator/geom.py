@@ -193,7 +193,7 @@ def clearance_sets(obstacles_norm, cols, rows, L, W, margin, aspect):
     return bx, by, bt
 
 
-def plan_oriented(pos, target, obstacles_norm, cols, rows, L, W, margin, aspect, turn_cost=10, fixed=False):
+def plan_oriented(pos, target, obstacles_norm, cols, rows, L, W, margin, aspect, turn_cost=10, fixed=False, heading=None):
     """fixed=True: the rover keeps a fixed world orientation (mecanum strafing, no turns): one AABB footprint
     (L along x, W along y) for every move and a small direction-change cost."""
     sc = cell_of(pos[0], pos[1], cols, rows)
@@ -235,6 +235,12 @@ def plan_oriented(pos, target, obstacles_norm, cols, rows, L, W, margin, aspect,
             if n in blk:
                 continue
             cost = 1
+            if d == -1 and heading is not None:
+                # the rover starts with a known heading and can drive forward OR reverse: charge the rotation needed to
+                # line up with the first leg (a 180 degree turn is never needed: reversing covers it)
+                ang = math.atan2(dr, dc * aspect) if False else math.atan2(dr, dc)
+                dth = min(abs(wrap(ang - heading)), abs(wrap(ang - heading - math.pi)))
+                cost += turn_cost * dth / (math.pi / 2)
             if d != -1 and nd != d:
                 # direction change (a rotation in place) happens at `cell`: it must be free for the enclosing circle,
                 # unless it is the start cell (the rover starts wherever it is and may already be aligned)

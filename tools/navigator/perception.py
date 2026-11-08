@@ -30,9 +30,13 @@ class Perception:
         self.last_markers = {}
         self.last_obs = None
         self.map_frames = 0
+        self.map_frozen = False      # True during a run: the obstacle map built from the target snapshot is reused
+        self.track = None            # (px, py, t): last tracked rover pixel, used by the frame source for its window
+        self.stats = {"frames": 0, "partial": 0, "ms": 0.0}
         self.allow_blob = True      # depth-blob pose when the rover marker is unreadable (labelled in the UI)
         self.last_pose = None
         self._raw_hist = []
+        self._recent = []            # recent rover poses (time, pose): the swept path is not an obstacle
         self.dims_hist = []
         self.aabb_hist = []          # recent world-aligned blob extents (wx, wy) in mm
           # recent (L, W) rover extents in mm measured from depth
@@ -87,16 +91,32 @@ class Perception:
         with self.lock:
             return self._process(frame, update_map)
 
+    def snapshot(self, frame, repeats=3):
+        """Obstacle map from ONE full frame (target selection): the EMA needs a few passes over the same frame to converge,
+        so cells found/cleared by this snapshot settle without waiting for more frames. Rover cells are excluded."""
+        with self.lock:
+            obs = self._process(frame, True)
+            if obs.pose is not None and self.calib.plane is not None and not getattr(frame, "partial", False):
+                for _ in range(repeats - 1):
+                    self.depth_map.update(frame.depth, self.calib, rover=[obs.pose], rover_exclude=self._rover_exclude())
+            return obs
+
     def _process(self, frame, update_map):
+        t_start = time.time()
         c = self.calib
+        partial = bool(getattr(frame, "partial", False))
         if c.K is None or tuple(c.K) != tuple(frame.K):
             c.K = list(frame.K)
-        markers = V.detect_markers(frame.gray)
-        for k, v in self.manual_markers.items():
-            markers.setdefault(k, v)
-        corners = V.boundary_corners(markers)
-        live = corners is not None
-        if live:
+        if partial:                   # rover-region frame: no boundary markers / mapping, pose only
+            markers, live = self.last_markers, bool(self.last_obs and self.last_obs.boundary_live)
+            corners = None
+        else:
+            markers = V.detect_markers(frame.gray)
+            for k, v in self.manual_markers.items():
+                markers.setdefault(k, v)
+            corners = V.boundary_corners(markers)
+            live = corners is not None
+        if live and not partial:
             if c.corners is None:
                 c.set_corners(corners)
                 self.save()
@@ -112,14 +132,14 @@ class Perception:
                 c.plane, c.aspect_measured, c.height_mm = None, False, None
                 self.depth_map.clear()
                 self.save()
-        if c.corners is not None and (c.plane is None or self.want_ground_refit):
+        if c.corners is not None and not partial and (c.plane is None or self.want_ground_refit):
             self._fit_ground(frame)
-        pose = V.rover_pose(markers, c, frame.depth) if c.H is not None else None
+        pose = V.rover_pose({} if partial else markers, c, frame.depth) if c.H is not None else None
         if pose is not None:
             pose["source"] = "marker"
         elif c.H is not None and c.plane is not None and self.allow_blob:
             near = (self.last_pose["x"], self.last_pose["y"]) if self.last_pose else None
-            pose = V.blob_pose(frame.depth, c, near=near)
+            pose = V.blob_pose(frame.depth, c, near=near, known=self.depth_map)
             if pose is not None:
                 raw = V.pattern_heading(frame.bgr, frame.gray, c, frame.depth, pose["px"])
                 if raw is not None:
@@ -131,13 +151,24 @@ class Perception:
             self.last_pose = pose
             if pose.get("source") == "depth-blob":
                 self.aabb_hist = (self.aabb_hist + [tuple(pose["dims_mm"])])[-9:]
-        if update_map and c.plane is not None and c.H is not None and frame.depth is not None:
-            used = self.depth_map.update(frame.depth, c, rover=pose, rover_exclude=self._rover_exclude())
+        do_map = update_map and not partial and not self.map_frozen
+        if pose is not None and pose.get("px") is not None:
+            self.track = (float(pose["px"][0]), float(pose["px"][1]), time.time())
+        if do_map and c.plane is not None and c.H is not None and frame.depth is not None:
+            now = time.time()
+            self._recent = [(t, q) for t, q in self._recent if now - t < 4.0][-4:]
+            if pose is not None:
+                self._recent.append((now, pose))
+            used = self.depth_map.update(frame.depth, c, rover=[q for _, q in self._recent] or None, rover_exclude=self._rover_exclude())
             self.map_frames += 1
-        if pose is not None and pose.get("theta") is not None and c.plane is not None and frame.depth is not None:
+        if do_map and pose is not None and pose.get("theta") is not None and c.plane is not None and frame.depth is not None:
             self._measure_rover(frame, pose)
-        self.last_markers = markers
+        if not partial:
+            self.last_markers = markers
         self.last_obs = Obs(frame, markers, pose, live)
+        self.stats["frames"] += 1
+        self.stats["partial"] += partial
+        self.stats["ms"] += (time.time() - t_start) * 1000
         return self.last_obs
 
     def _fit_ground(self, frame):

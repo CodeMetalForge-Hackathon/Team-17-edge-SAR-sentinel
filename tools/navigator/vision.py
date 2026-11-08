@@ -246,10 +246,11 @@ class ObstacleMap:
         nrm = calib.to_norm(fpx)
         inside = (nrm[:, 0] >= 0) & (nrm[:, 0] < 1) & (nrm[:, 1] >= 0) & (nrm[:, 1] < 1)
         in_rover = np.zeros(len(h), bool)
-        if rover is not None:  # the rover and its marker are not obstacles (but its cells count as observed)
-            du = (nrm[:, 0] - rover["x"]) * calib.aspect
-            dv = nrm[:, 1] - rover["y"]
-            in_rover = np.hypot(du, dv) <= rover_exclude
+        rovers = [] if rover is None else (rover if isinstance(rover, list) else [rover])
+        for rv in rovers:      # the rover (now and where it was a moment ago) is not an obstacle
+            du = (nrm[:, 0] - rv["x"]) * calib.aspect
+            dv = nrm[:, 1] - rv["y"]
+            in_rover |= np.hypot(du, dv) <= rover_exclude
         ci = np.minimum((nrm[:, 0] * self.cols).astype(int), self.cols - 1)
         ri = np.minimum((nrm[:, 1] * self.rows).astype(int), self.rows - 1)
         flat = ri * self.cols + ci
@@ -261,6 +262,11 @@ class ObstacleMap:
         obstacle = (hit_cnt >= 3) & (hit_cnt >= 0.4 * np.maximum(valid_cnt, 1))
         obstacle = cv2.morphologyEx(obstacle.astype(np.uint8), cv2.MORPH_OPEN, np.ones((2, 2), np.uint8)).astype(bool)
         self.ev[observed] = 0.6 * self.ev[observed] + 0.4 * obstacle[observed]
+        if rovers:
+            cc, rr = np.meshgrid(np.arange(self.cols), np.arange(self.rows))
+            for rv in rovers:                      # cells under the rover cannot be obstacles: clear stale evidence
+                zone = np.hypot(((cc + .5) / self.cols - rv["x"]) * calib.aspect, (rr + .5) / self.rows - rv["y"]) <= rover_exclude * 0.8
+                self.ev[zone & ~obstacle] *= 0.3
         self.seen |= observed
         with np.errstate(invalid="ignore", divide="ignore"):
             hm = np.where(hit_cnt > 0, hsum / np.maximum(hit_cnt, 1), 0)
@@ -270,6 +276,15 @@ class ObstacleMap:
     def blocked_cells(self, thr=0.5):
         rr, cc = np.nonzero(self.ev >= thr)
         return list(zip(cc.tolist(), rr.tolist()))
+
+    def blocked_at(self, nr, thr=0.5, grow=1):
+        """Vectorised: are the normalized points (N,2) inside a mapped obstacle cell (grown by `grow` cells)?"""
+        ci = np.clip((nr[:, 0] * self.cols).astype(int), 0, self.cols - 1)
+        ri = np.clip((nr[:, 1] * self.rows).astype(int), 0, self.rows - 1)
+        b = (self.ev >= thr).astype(np.uint8)
+        if grow:
+            b = cv2.dilate(b, np.ones((2 * grow + 1, 2 * grow + 1), np.uint8))
+        return b[ri, ci].astype(bool)
 
     def unknown_cells(self):
         """Cells never observed with valid depth: unknown is NOT free space."""
@@ -317,7 +332,7 @@ def flatten_view(bgr, calib, out_w=720):
     return cv2.warpPerspective(bgr, M, (out_w, out_h), flags=cv2.INTER_LINEAR)
 
 
-def blob_pose(depth, calib, near=None, near_r=0.3, expect_mm=(200.0, 170.0)):
+def blob_pose(depth, calib, near=None, near_r=0.3, expect_mm=(200.0, 170.0), known=None, dbg=None):
     """Position-only rover pose from depth: the raised blob (40..135 mm above the floor plane) of rover size, not
     touching taller obstacles. Used when the rover marker is not readable. Returns pose dict (theta None) with the
     world-aligned footprint extents in mm, or None. `near` (x, y) restricts to the blob closest to the last pose."""
@@ -333,9 +348,10 @@ def blob_pose(depth, calib, near=None, near_r=0.3, expect_mm=(200.0, 170.0)):
     valid = z > 0
     quad = np.zeros((Hh, Ww), np.uint8)
     cv2.fillConvexPoly(quad, calib.corners.astype(np.int32), 1)
-    quad = quad.astype(bool)
-    mid = valid & quad & (h > 35) & (h < 165)
-    tall = cv2.dilate((valid & (h >= 165)).astype(np.uint8), np.ones((9, 9), np.uint8)).astype(bool)
+    quad = cv2.dilate(quad, np.ones((41, 41), np.uint8)).astype(bool)      # the rover may overhang the boundary a little
+    mid = valid & quad & (h > 35) & (h < 175)
+    real = mid.copy()                                  # pixels with real depth (closing below may fill holes)
+    tall = cv2.dilate((valid & (h >= 175)).astype(np.uint8), np.ones((9, 9), np.uint8)).astype(bool)
     mid = cv2.morphologyEx(mid.astype(np.uint8), cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
     mid = cv2.morphologyEx(mid, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9)))   # merge split halves
     nlab, lab, stats, _ = cv2.connectedComponentsWithStats(mid, connectivity=8)
@@ -345,24 +361,35 @@ def blob_pose(depth, calib, near=None, near_r=0.3, expect_mm=(200.0, 170.0)):
         if area < 300:
             continue
         m = lab == i
-        if (m & tall).sum() > 0.05 * area:
+        if (m & tall).sum() > 0.20 * area:
+            if dbg is not None: dbg.append(("tall", int(area), int((m & tall).sum())))
             continue                                   # a fringe of a taller obstacle, not the rover
+        m = m & real
+        if m.sum() < 150:
+            continue
         py, px = np.nonzero(m)
         P = np.stack([X[py, px], Y[py, px], z[py, px]], 1).astype(np.float64)
         hh = h[py, px].astype(np.float64)
         Pf = P + n[None, :] * hh[:, None]
         fpx = np.stack([fx * Pf[:, 0] / Pf[:, 2] + cx, fy * Pf[:, 1] / Pf[:, 2] + cy], 1)
         nr = calib.to_norm(fpx)
+        if known is not None:          # drop pixels that belong to already-mapped obstacles touching the rover's blob
+            keep = ~known.blocked_at(nr)
+            if 150 <= keep.sum() and keep.mean() > 0.4:      # if most of the blob is "known obstacle", it is the rover itself
+                nr, hh = nr[keep], hh[keep]
+                px, py = px[keep], py[keep]
         u = nr[:, 0] * calib.aspect * calib.height_mm
         v = nr[:, 1] * calib.height_mm
         wx = float(np.percentile(u, 93) - np.percentile(u, 7)) * 1.15      # robust to flying-pixel outliers
         wy = float(np.percentile(v, 93) - np.percentile(v, 7)) * 1.15
         if not (80 <= wx <= 340 and 80 <= wy <= 340):
+            if dbg is not None: dbg.append(("dims", int(area), round(wx), round(wy)))
             continue
         cxn, cyn = float(np.median(nr[:, 0])), float(np.median(nr[:, 1]))
         if near is not None:
             dist = math.hypot((cxn - near[0]) * calib.aspect, cyn - near[1])
             if dist > near_r:
+                if dbg is not None: dbg.append(("far", int(area), round(dist, 2)))
                 continue
             score = dist
         else:

@@ -7,6 +7,7 @@ three times. Feedback {"T":130} gives the IMU yaw (degrees) used as the heading 
 """
 import http.client
 import json
+import threading
 import time
 import urllib.parse
 
@@ -22,8 +23,15 @@ class UgvLink:
         self.host, self.local_ip, self.speed, self.turn, self.dry_run = host, local_ip, speed, turn, dry_run
         self.sent = []
         self.last_fb = None
+        self._io = threading.Lock()
+        self._drive = None            # (l, r, t_refresh) while streaming
+        self._thr = None
 
     def _get(self, msg, timeout=0.6):
+        with self._io:
+            return self._get_locked(msg, timeout)
+
+    def _get_locked(self, msg, timeout=0.6):
         if self.dry_run:
             self.sent.append(msg)
             return {"T": 1001, "y": 0.0, "L": 0, "R": 0, "v": 11.5}
@@ -56,10 +64,11 @@ class UgvLink:
                 time.sleep(0.05)
         return ok
 
-    def move(self, cmd, dur, speed=None):
+    def move(self, cmd, dur, speed=None, trim=0.0):
+        self.halt()
         dur = min(float(dur), MAX_BURST_S)
         s = self.speed if speed is None else min(float(speed), 0.6)
-        lr = {"F": (s, s), "B": (-s, -s),
+        lr = {"F": (s * (1 - trim), s * (1 + trim)), "B": (-s * (1 + trim), -s * (1 - trim)),
               "Q": (-self.turn, self.turn), "E": (self.turn, -self.turn)}.get(cmd)
         if lr is None:
             raise UgvCommError("command %r not supported by a differential-drive rover" % cmd)
@@ -109,6 +118,43 @@ class UgvLink:
         if not self.stop():
             raise UgvCommError("STOP could not be confirmed after the turn")
         return got
+
+    # --- streamed driving (cruise): wheel commands re-sent at 10 Hz, expiring unless refreshed by a fresh camera pose
+    def drive(self, left, right, ttl=0.9):
+        """Set the streamed wheel command. The background sender stops the rover if drive() is not called again within
+        ttl seconds (stale tracking / crashed controller), and exits."""
+        self._ttl = ttl
+        self._drive = (float(left), float(right), time.time())
+        if self._thr is None or not self._thr.is_alive():
+            self._thr = threading.Thread(target=self._stream, daemon=True)
+            self._thr.start()
+
+    def _stream(self):
+        while True:
+            d = self._drive
+            if d is None:
+                return
+            l, r, t = d
+            if time.time() - t > self._ttl:
+                self._drive = None
+                self.stop(3)
+                return
+            try:
+                self._get({"T": 1, "L": l, "R": r}, timeout=0.3)
+            except UgvCommError:
+                self._drive = None
+                self.stop(5)
+                return
+            time.sleep(0.08)
+
+    def halt(self):
+        """End any streamed drive and make certain the rover stops."""
+        if self._drive is not None or (self._thr is not None and self._thr.is_alive()):
+            self._drive = None
+            if self._thr is not None:
+                self._thr.join(0.5)
+            return self.stop()
+        return True
 
     def feedback(self):
         fb = self._get({"T": 130}, timeout=0.6)
