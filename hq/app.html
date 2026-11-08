@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>HQ: Operation Lost and Found</title>
+<style>
+  :root { --bg:#111418; --panel:#1b2027; --ink:#e8eaed; --quiet:#9aa3ad; --accent:#3b8bff; --ok:#2fa84f; --bad:#d93838; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:15px system-ui,-apple-system,Segoe UI,sans-serif; }
+  header { display:flex; flex-wrap:wrap; gap:10px; align-items:center; padding:12px 16px; background:var(--panel); position:sticky; top:0; z-index:2; }
+  h1 { font-size:17px; margin:0 12px 0 0; }
+  button { font:600 15px system-ui,sans-serif; padding:10px 16px; border-radius:8px; border:1px solid #39424d; background:#262d36; color:var(--ink); cursor:pointer; }
+  button:disabled { opacity:.45; cursor:default; }
+  #photo-btn { background:var(--accent); border-color:var(--accent); }
+  #go { background:var(--ok); border-color:var(--ok); }
+  #stop { background:var(--bad); border-color:var(--bad); font-size:18px; padding:10px 26px; }
+  .seg { display:inline-flex; border:1px solid #39424d; border-radius:8px; overflow:hidden; }
+  .seg label { padding:9px 12px; cursor:pointer; color:var(--quiet); }
+  .seg input { display:none; }
+  .seg input:checked + span { color:var(--ink); font-weight:600; }
+  .seg label:has(input:checked) { background:#2c3540; }
+  #status { margin-left:auto; padding:6px 10px; border-radius:6px; background:#262d36; font-weight:600; }
+  main { display:grid; grid-template-columns:minmax(0,1fr) 340px; gap:16px; padding:16px; }
+  @media (max-width:1000px) { main { grid-template-columns:1fr; } }
+  .panel { background:var(--panel); border-radius:10px; padding:12px; }
+  #map { width:100%; height:auto; display:block; border-radius:6px; cursor:crosshair; background:#000; min-height:120px; }
+  #photo { width:100%; height:auto; display:block; border-radius:6px; margin-top:8px; }
+  .hint { color:var(--quiet); font-size:13px; margin:6px 0 0; }
+  dl { display:grid; grid-template-columns:auto 1fr; gap:6px 10px; margin:0; }
+  dt { color:var(--quiet); } dd { margin:0; font-weight:600; }
+  #log { font:12.5px ui-monospace,Consolas,monospace; white-space:pre-wrap; color:#c8ced5; max-height:320px; overflow:auto; margin:0; }
+  h2 { font-size:14px; margin:0 0 8px; color:var(--quiet); font-weight:600; text-transform:uppercase; letter-spacing:.04em; }
+  .err { color:#ff8a8a; }
+</style></head><body>
+<header>
+  <h1>HQ · Lost and Found</h1>
+  <button id="photo-btn">Get photo</button>
+  <label class="hint" style="margin:0"><input type="checkbox" id="live"> live (every 3 s)</label>
+  <span class="seg">
+    <label><input type="radio" name="mode" value="target" checked><span>Click = target</span></label>
+    <label><input type="radio" name="mode" value="rover"><span>Click = rover is here</span></label>
+  </span>
+  <button id="go">GO</button>
+  <button id="stop">STOP</button>
+  <button id="recal" title="Forget the measured rover motion; GO repeats the 2 test bursts">Re-calibrate</button>
+  <span id="status">loading</span>
+</header>
+<main>
+  <section class="panel">
+    <h2>Map (top-down, A1 = bottom-left)</h2>
+    <img id="map" alt="Map with blocked squares, route and rover">
+    <p class="hint">Red squares are blocked (rubble plus rover clearance). The orange line is the route, the star is the target, the green circle is the rover.</p>
+  </section>
+  <aside>
+    <section class="panel">
+      <h2>Mission</h2>
+      <dl>
+        <dt>Rover</dt><dd id="rover">-</dd>
+        <dt>Target</dt><dd id="target">-</dd>
+        <dt>Route</dt><dd id="route">-</dd>
+        <dt>Blocked</dt><dd id="blocked">-</dd>
+        <dt>Motion</dt><dd id="motion">-</dd>
+        <dt>Photo</dt><dd id="age">-</dd>
+      </dl>
+      <p id="msg" class="hint"></p>
+    </section>
+    <section class="panel" style="margin-top:16px">
+      <h2>Aerial camera</h2>
+      <img id="photo" alt="Latest aerial photo">
+    </section>
+    <section class="panel" style="margin-top:16px">
+      <h2>Log</h2>
+      <pre id="log"></pre>
+    </section>
+  </aside>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+let st = null, lastShown = null, busy = false;
+
+async function post(path, body) {
+  const r = await fetch(path, { method: "POST", headers: { "X-Requested-With": "hq" }, body: JSON.stringify(body || {}) });
+  let j = {}; try { j = await r.json(); } catch (e) {}
+  if (!r.ok) { $("msg").textContent = j.error || ("error " + r.status); $("msg").className = "hint err"; }
+  else { $("msg").textContent = ""; $("msg").className = "hint"; }
+  if (j.state || j.status) show(j.state || j);
+  refreshImages(true);
+  return r.ok;
+}
+
+function refreshImages(force) {
+  const key = st ? JSON.stringify([st.rover, st.target, st.path, st.blocked, st.photo_age_s === null, st.log[0]]) : "";
+  if (!force && key === lastShown) return;
+  lastShown = key;
+  const t = Date.now();
+  $("map").src = "/view.png?" + t;
+  $("photo").src = "/photo.jpg?" + t;
+}
+
+function show(s) {
+  st = s;
+  const b = $("status");
+  b.textContent = s.status;
+  b.style.background = s.running ? "#1e5c32" : (s.status.startsWith("stopped:") ? "#6b1f1f" : "#262d36");
+  $("rover").textContent = s.rover || "unknown (found on GO)";
+  $("target").textContent = s.target || "click a square";
+  $("route").textContent = s.path ? s.path.join(" › ") : (s.target ? "none yet" : "-");
+  $("blocked").textContent = s.blocked && s.blocked.length ? s.blocked.join(" ") : "none";
+  $("motion").textContent = (s.motion_allowed ? "allowed" : "OFF") + (s.calibrated ? ", calibrated" : ", not calibrated yet");
+  $("age").textContent = s.photo_age_s === null ? "none yet" : s.photo_age_s + " s ago";
+  $("log").textContent = s.log.join("\n");
+  $("go").disabled = s.running || !s.motion_allowed;
+  $("photo-btn").disabled = s.running || busy;
+}
+
+async function poll() {
+  try { show(await (await fetch("/api/state")).json()); refreshImages(false); } catch (e) { $("status").textContent = "HQ unreachable"; }
+}
+
+$("photo-btn").onclick = async () => {
+  busy = true; $("photo-btn").textContent = "Taking photo..."; $("photo-btn").disabled = true;
+  try { await post("/api/photo"); } finally { busy = false; $("photo-btn").textContent = "Get photo"; poll(); }
+};
+$("go").onclick = () => post("/api/go");
+$("stop").onclick = () => post("/api/stop");
+$("recal").onclick = () => post("/api/recal");
+document.addEventListener("keydown", e => { if (e.key === " " || e.key === "Escape") { e.preventDefault(); post("/api/stop"); } });
+
+$("map").onclick = e => {
+  if (!st || !st.map_px) return;
+  const img = $("map"), r = img.getBoundingClientRect();
+  const u = (e.clientX - r.left) * img.naturalWidth / r.width, v = (e.clientY - r.top) * img.naturalHeight / r.height;
+  const x = u / st.px_per_m, y = (img.naturalHeight - v) / st.px_per_m;
+  const col = Math.floor(x / (st.size_m[0] / st.cols)), row = Math.floor(y / (st.size_m[1] / st.rows));
+  if (col < 0 || row < 0 || col >= st.cols || row >= st.rows) return;
+  const cell = String.fromCharCode(65 + col) + (row + 1);
+  const mode = document.querySelector("input[name=mode]:checked").value;
+  post(mode === "rover" ? "/api/rover" : "/api/target", { cell });
+};
+
+setInterval(() => { if ($("live").checked && st && !st.running && !busy) $("photo-btn").click(); }, 3000);
+setInterval(poll, 1000);
+poll().then(() => refreshImages(true));
+</script>
+</body></html>

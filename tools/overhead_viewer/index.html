@@ -1,0 +1,562 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Overhead Boundary Viewer</title>
+<style>
+  body{font:14px system-ui,sans-serif;margin:0;background:#15181c;color:#e6e6e6}
+  header{padding:10px 16px;background:#1f242a;display:flex;gap:10px 14px;align-items:center;flex-wrap:wrap}
+  h1{font-size:16px;margin:0}
+  main{display:flex;gap:16px;padding:16px;flex-wrap:wrap;align-items:flex-start}
+  .panel{background:#1f242a;border-radius:6px;padding:10px}
+  canvas{display:block;max-width:100%;height:auto;cursor:crosshair;background:#000}
+  #src{width:700px} #top{width:660px}
+  .status{padding:3px 8px;border-radius:4px;font-weight:600}
+  .ok{background:#1d5c2e}.bad{background:#8a2222}
+  label{margin-right:6px} input[type=number]{width:58px}
+  button{padding:4px 10px}
+  #result{font:15px ui-monospace,Consolas,monospace;min-height:60px;white-space:pre}
+  #fp{font:12px ui-monospace,Consolas,monospace;white-space:pre-wrap;max-width:660px;color:#bcd}
+  .note{color:#aab;font-size:12px;max-width:760px;line-height:1.4}
+</style></head><body>
+<header>
+  <h1>Overhead boundary viewer (static photo)</h1>
+  <span id="status" class="status bad">loading</span>
+  <span id="age"></span>
+  <label>cols <input id="cols" type="number" min="1" max="26" value="18"></label>
+  <label>rows <input id="rows" type="number" min="1" max="26" value="12"></label>
+  <label>extra margin (normalized) <input id="margin" type="number" min="0" max="0.2" step="0.005" value="0.01"></label>
+  <label>mode <select id="mode"><option value="inspect">Inspect coordinate</option><option value="obst">Draw obstacle footprint</option><option value="roverbox">Draw rover footprint</option><option value="heading">Set rover forward direction</option><option value="target">Set target cell</option></select></label>
+  <button id="delfp">Delete selected footprint</button>
+  <button id="shoot" title="Take a new photo on the aerial Zero, then load it">Take photo</button>
+  <button id="reload">Reload image</button>
+  <button id="setbefore" title="Use the current photo of the EMPTY sandbox as the reference">Save as BEFORE</button>
+  <button id="detect" title="Compare the current photo with BEFORE and turn changes into obstacle footprints">Detect rubble</button>
+  <a id="dbg" href="/detect_debug.png" target="_blank" style="color:#9cf">detection view</a>
+  <button id="confirm">Confirm boundary alignment</button>
+  <button id="confirmfp">Confirm footprints</button>
+  <button id="clearsc">Clear scenario</button>
+  <button id="reset">Reset corners</button>
+  <button id="save">Save scenario</button><button id="loadsc">Reload saved</button>
+</header>
+<main>
+  <div class="panel">
+    <div>Original image: drag the 4 corner handles to the black squares' corners nearest the sandbox. Footprints are drawn in the flattened view and projected here.</div>
+    <canvas id="src"></canvas>
+  </div>
+  <div class="panel">
+    <div>Flattened normalized view (y up; stretched to fit, not to physical scale). Drag to draw a rectangle in a "Draw ... footprint" mode; click one to select it, drag a corner to resize, Delete key removes it.</div>
+    <canvas id="top" width="720" height="480"></canvas>
+    <div id="result">Click inside the boundary.</div>
+    <div id="fp"></div>
+    <div id="motion" class="panel" style="margin:8px 0;max-width:600px">
+      <b>Manual rover control</b> <span id="mstate"></span>
+      <div><label><input type="checkbox" id="arm"> Enable motion for a supervised test</label>
+        <label>burst <select id="dur"><option>0.25</option><option>0.5</option></select> s</label></div>
+      <div id="mbtns" style="margin:6px 0">
+        <button data-c="Q" title="rotate (firmware Q): direction UNVERIFIED">&#10226; rot Q</button>
+        <button data-c="F" title="firmware F: UNVERIFIED">&#8593; fwd F</button>
+        <button data-c="E" title="rotate (firmware E): direction UNVERIFIED">&#10227; rot E</button><br>
+        <button data-c="L" title="firmware L: UNVERIFIED">&#8592; side L</button>
+        <button data-c="B" title="firmware B: UNVERIFIED">&#8595; back B</button>
+        <button data-c="R" title="firmware R: UNVERIFIED">&#8594; side R</button>
+      </div>
+      <button id="stop" style="background:#c00;color:#fff;font:bold 22px sans-serif;width:100%;padding:12px">STOP (Space / Esc)</button>
+      <div id="mmsg" style="margin-top:6px;font-size:13px"></div>
+    </div>
+    <div id="route" style="font:13px ui-monospace,Consolas,monospace;white-space:pre-wrap;max-width:660px;margin-top:8px"></div>
+  </div>
+</main>
+<div class="note" style="padding:0 16px 16px">
+  Corner order: BL=(0,0) green, BR=(1,0) blue, TR=(1,1) orange, TL=(0,1) magenta (as seen in the image). Cells: letter = column left→right,
+  number = row bottom→top (A1 is bottom-left). All coordinates, footprint sizes and margins are dimensionless fractions of the boundary, NOT metres.
+  Lens distortion is NOT corrected, so the mapping is only approximately straight-line accurate, worse toward image edges. The sandbox's real aspect ratio is unknown, so a "radius" in
+  normalized units is only an approximation of a circle. Planning inflates every obstacle by the rover footprint's enclosing-circle radius plus the extra margin and keeps the rover centre
+  that far from the sandbox edge (whole-cell test: conservative, finer grids allow narrower gaps). Obstacle footprints come from Detect rubble (current photo vs the saved BEFORE photo; detected ones are drawn dashed) and can be corrected by hand. This is a static route preview: not a
+  guarantee of physical clearance, not a motor command. Rover forward direction and motion conventions are UNVERIFIED until tested on hardware. Each move needs a fresh photo and re-set pose.
+</div>
+<script src="/homography.js"></script>
+<script>
+const HG = window.Homography;
+const $ = id => document.getElementById(id);
+const src = $("src"), tv = $("top"), sctx = src.getContext("2d"), tctx = tv.getContext("2d");
+const COLORS = ["#2ecc40", "#3b8bff", "#ff9b21", "#ff3df0"], NAMES = ["BL (0,0)", "BR (1,0)", "TR (1,1)", "TL (0,1)"];
+const MINSZ = 0.008; // smallest footprint edge (normalized)
+let img = null, corners = null, cal = null, err = "", clicked = null, drag = -1, imgMtime = null, moved = false;
+let hints = null, imgMtimeS = 0, confirmed = false, fconfirmed = false, srv = null, offer = null, route = null, warped = null;
+let obstacles = [];        // normalized rects {x0,y0,x1,y1}
+let roverSize = null;      // {w,h} normalized (from the last drawn rover footprint)
+let rover = null;          // {x,y,hx,hy,rect} pose on the CURRENT photo only
+let target = null;         // {x,y} normalized (centre of the chosen cell)
+let sel = null;            // {kind:"obst"|"rover", i}
+let dragRect = null;       // in-progress rectangle interaction in the flattened view
+
+// Default guess near the inner corners of the 4 markers in sandbox_setup.jpg (1280x720); user adjusts.
+const DEFAULT_FRAC = [[414/1280, 518/720], [780/1280, 510/720], [767/1280, 357/720], [433/1280, 355/720]];
+
+function margin() { const v = parseFloat($("margin").value); return isFinite(v) ? Math.max(0, Math.min(0.2, v)) : 0.01; }
+function cols() { return Math.max(1, Math.min(26, parseInt($("cols").value) || 18)); }
+function rows() { return Math.max(1, Math.min(26, parseInt($("rows").value) || 12)); }
+const f3 = v => v.toFixed(3);
+const cname = p => HG.colName(p[0]) + (p[1] + 1);
+const cellOf = (x, y) => { const r = HG.normToCell(x, y, cols(), rows()); return [r.col, r.row]; };
+function planRadius() { return roverSize ? HG.enclosingRadius(roverSize.w, roverSize.h) + margin() : null; }
+function startCell() { return rover ? cellOf(rover.x, rover.y) : null; }
+function targetCell() { return target ? cellOf(target.x, target.y) : null; }
+
+async function load() {
+  const r = await fetch("/image?" + Date.now());
+  if (!r.ok) { setStatus(false, "image load failed: " + r.status); return; }
+  imgMtimeS = parseFloat(r.headers.get("X-Image-Mtime")); imgMtime = imgMtimeS * 1000;
+  const bmp = await createImageBitmap(await r.blob());
+  img = bmp; src.width = bmp.width; src.height = bmp.height;
+  let saved = null;
+  try { const c = await fetch("/corners"); if (c.ok) saved = await c.json(); } catch (e) {}
+  let note = "";
+  confirmed = false; fconfirmed = false; hints = saved && saved.hints || null;
+  if (saved && saved.corners && saved.image_size && saved.image_size[0] === bmp.width && saved.image_size[1] === bmp.height) {
+    corners = saved.corners;
+    note = applyScenario(saved);
+  } else {
+    corners = DEFAULT_FRAC.map(([fx, fy]) => [fx * bmp.width, fy * bmp.height]);
+    note = saved && saved.image_size ? "Image resolution " + bmp.width + "x" + bmp.height + " differs from the saved calibration (" + saved.image_size.join("x") + "): saved boundary NOT reused. Place the 4 handles, then confirm." : "";
+  }
+  update();
+  if (note) $("route").textContent = note + "\n" + $("route").textContent;
+}
+
+// Load a fresh photo: keep footprints/target/margin/rover size, clear the rover POSE, require both confirmations again.
+async function reloadImage() {
+  const keep = { obstacles, roverSize, target };
+  rover = null; route = null; clicked = null; offer = null; sel = sel && sel.kind === "obst" ? sel : null;
+  await load();
+  obstacles = keep.obstacles; roverSize = keep.roverSize; target = keep.target; rover = null; hints = null; // live labels win; pose is never reused
+  confirmed = false; fconfirmed = false;
+  replan(); draw();
+  $("mmsg").textContent = "Fresh image loaded. Pose cleared: confirm boundary alignment and footprints, then draw the rover footprint and set its forward direction.";
+}
+
+function setStatus(ok, msg) { const s = $("status"); s.className = "status " + (ok ? "ok" : "bad"); s.textContent = msg; }
+
+function update() {
+  cal = HG.calibrate(corners, img.width, img.height);
+  err = cal.error || "";
+  setStatus(!err, err ? "INVALID: " + err : "calibrated");
+  const ageS = (Date.now() - imgMtime) / 1000;
+  $("age").textContent = "image file age: " + (ageS > 3600 ? (ageS / 3600).toFixed(1) + " h" : Math.round(ageS) + " s") + " (static photo)";
+  warped = err ? null : warp();
+  if (err) clicked = null;
+  replan();
+  draw();
+}
+
+// ---- scenario (version 2: normalized footprints; never cell indices) ----
+function scenarioEmpty() { return !target && !rover && !roverSize && obstacles.length === 0; }
+function clearScenario() { target = null; rover = null; roverSize = null; obstacles = []; sel = null; offer = null; route = null; }
+const okRect = r => r && ["x0", "y0", "x1", "y1"].every(k => isFinite(r[k]) && r[k] >= 0 && r[k] <= 1) && r.x1 - r.x0 >= MINSZ && r.y1 - r.y0 >= MINSZ;
+function applyScenario(sv) {
+  if (!sv.scenario) return "";
+  const sc = sv.scenario;
+  if (sc.version !== 2) return "Old-format scenario (cell indices from another grid) was NOT reused; a backup of it is kept. Draw footprints for this grid.";
+  const C = sc.cols, R = sc.rows;
+  const okT = t => t === null || (t && isFinite(t.x) && isFinite(t.y) && t.x >= 0 && t.x <= 1 && t.y >= 0 && t.y <= 1);
+  if (!Number.isInteger(C) || !Number.isInteger(R) || C < 1 || R < 1 || C > 26 || R > 26 || !isFinite(sc.margin) || sc.margin < 0 || sc.margin > 0.2 ||
+      !okT(sc.target) || !Array.isArray(sc.obstacles) || !sc.obstacles.every(okRect) ||
+      !(sc.roverSize === null || (sc.roverSize && sc.roverSize.w > 0 && sc.roverSize.h > 0 && sc.roverSize.w <= 1 && sc.roverSize.h <= 1)))
+    return "Saved scenario was incompatible and was discarded.";
+  $("cols").value = C; $("rows").value = R; $("margin").value = sc.margin;
+  target = sc.target; obstacles = sc.obstacles.map(r => ({ x0: r.x0, y0: r.y0, x1: r.x1, y1: r.y1 })); roverSize = sc.roverSize; sel = null;
+  return "Saved scenario restored (" + C + "x" + R + " grid, " + obstacles.length + " obstacle footprint(s)). Footprints and alignment need confirmation on this photo.";
+}
+function scenarioPayload() {
+  return { version: 2, cols: cols(), rows: rows(), margin: margin(), target, obstacles, roverSize };
+}
+
+function occupiedSet() { const s = new Set(); obstacles.forEach(r => HG.overlapCells(r, cols(), rows()).forEach(c => s.add(c[0] + "," + c[1]))); return s; }
+function say(text, color, btn) {
+  const el = $("route"); el.style.color = color || ""; el.textContent = text;
+  if (btn) { const b = document.createElement("button"); b.textContent = btn.label; b.onclick = btn.fn; el.appendChild(document.createElement("br")); el.appendChild(b); }
+}
+function fpText() {
+  const C = cols(), R = rows(), occ = occupiedSet();
+  let t = "Grid " + C + "x" + R + " | obstacles " + obstacles.length + " -> " + occ.size + " blocked cell(s) | extra margin " + f3(margin()) + " (normalized)\n";
+  obstacles.forEach((r, i) => { t += (sel && sel.kind === "obst" && sel.i === i ? ">" : " ") + "#" + (i + 1) + " x " + f3(r.x0) + ".." + f3(r.x1) + "  y " + f3(r.y0) + ".." + f3(r.y1) + "  (" + HG.overlapCells(r, C, R).length + " cells)\n"; });
+  if (roverSize) t += "rover footprint " + f3(roverSize.w) + " x " + f3(roverSize.h) + " (normalized, not metres) | enclosing radius " + f3(HG.enclosingRadius(roverSize.w, roverSize.h)) + " + margin = planning radius " + f3(planRadius()) + "\n";
+  else t += "rover footprint: not drawn yet\n";
+  $("fp").textContent = t;
+}
+function nearestFree(pb, sc) {
+  const C = cols(), R = rows(), tc = targetCell(), cand = [];
+  for (let c = 0; c < C; c++) for (let r = 0; r < R; r++) if (!pb.has(c + "," + r) && !HG.footprintProblem(c, r, C, R, roverSize.w, roverSize.h, obstacles)) cand.push([c, r]);
+  cand.sort((p, q) => Math.hypot(p[0] - tc[0], p[1] - tc[1]) - Math.hypot(q[0] - tc[0], q[1] - tc[1]));
+  for (const p of cand) if (!HG.astar(C, R, pb, sc, p).error) return p;
+  return null;
+}
+function replan() {
+  route = null; offer = null; fpText();
+  if (err) { say(scenarioEmpty() ? "" : "Route cleared: calibration invalid (" + err + ").", "#ff8080"); return; }
+  if (!confirmed) { say("Boundary NOT confirmed for this photo. Check the 4 handles sit on the marker corners, then press 'Confirm boundary alignment'. No route is shown until then.", "#ffcc66"); return; }
+  if (!fconfirmed) { say("Obstacle footprints / rover size NOT confirmed for this photo. Check every rectangle against the objects, then press 'Confirm footprints'. No route is shown until then.", "#ffcc66"); return; }
+  if (!roverSize) { say("Draw the rover footprint first (mode 'Draw rover footprint'): its size sets the planning clearance and its centre is the rover position.", "#ffcc66"); return; }
+  const C = cols(), R = rows(), w = roverSize.w, h = roverSize.h, d = planRadius();
+  const params = "rover " + f3(w) + "x" + f3(h) + " (normalized), planning radius " + f3(d) + " incl. margin " + f3(margin());
+  if (!rover) { say("Rover pose not set on this photo: draw the rover footprint (centre) and set its forward direction.\n" + params, "#ffcc66"); return; }
+  const bad = obstacles.findIndex(o => HG.rectsOverlap(rover.rect, o));
+  if (bad >= 0) { say("START REJECTED: the rover footprint overlaps obstacle #" + (bad + 1) + ". Redraw the rover or the obstacle.", "#ff8080"); return; }
+  if (!target) { say("Rover at " + cname(startCell()) + ". Set a target cell.\n" + params); return; }
+  const sc = startCell(), tc = targetCell(), tprob = HG.footprintProblem(tc[0], tc[1], C, R, w, h, obstacles);
+  const pb = HG.planningBlocked(obstacles, C, R, d), startInside = pb.has(sc[0] + "," + sc[1]); pb.delete(sc[0] + "," + sc[1]);
+  if (tprob || pb.has(tc[0] + "," + tc[1])) {
+    offer = nearestFree(pb, sc);
+    say("TARGET REJECTED: " + cname(tc) + " - " + (tprob || "rover would be within the planning radius (" + f3(d) + ") of an obstacle or the sandbox edge") + "." +
+        (offer ? "\nNearest reachable allowed cell: " + cname(offer) + " (inspection point)." : "\nNo reachable allowed cell found.") + "\n" + params, "#ff8080",
+      offer ? { label: "Use " + cname(offer) + " as inspection point", fn: () => { target = { x: (offer[0] + .5) / C, y: (offer[1] + .5) / R }; replan(); draw(); } } : null);
+    return;
+  }
+  const res = HG.astar(C, R, pb, sc, tc);
+  if (res.error) { say("NO ROUTE: " + res.error.replace(/^no route: /, "") + ".\nStart " + cname(sc) + ", target " + cname(tc) + ", " + params + ".\nClearance is NOT reduced automatically; change the margin or grid yourself if you want to retry.", "#ff8080"); return; }
+  route = res.route;
+  const hd = rover.hx != null ? headingInfo() : null;
+  say("Route found (static preview over hand-drawn footprints; not a safe path or motor command)\n" + route.length + " cells, " + (route.length - 1) + " steps. " + params + (startInside ? " (start is inside the margin zone)" : "") + ":\n" +
+    route.map(cname).join(" -> ") + "\nWaypoints (cell centres, normalized x,y):\n" +
+    route.map(p => { const w2 = HG.cellCentre(p[0], p[1], C, R); return cname(p) + " (" + f3(w2[0]) + ", " + f3(w2[1]) + ")"; }).join("\n") +
+    (route.length > 1 ? "\nNext cell " + cname(route[1]) + " is grid-" + gridDir(route[1][0] - route[0][0], route[1][1] - route[0][1]) + " of the rover" : "") +
+    (hd ? "\nRover forward points grid-" + hd.dir + " (" + (Math.round(hd.deg) || 0) + " deg in the normalized frame; sandbox aspect unknown)" : "\nSet rover forward direction to see heading") +
+    "\nOne short step at a time: move, STOP, new photo, re-set pose, replan.");
+}
+function gridDir(dc, dr) { return Math.abs(dc) >= Math.abs(dr) ? (dc > 0 ? "East(+x)" : "West(-x)") : (dr > 0 ? "North(+y)" : "South(-y)"); }
+function headingInfo() { const dx = rover.hx - rover.x, dy = rover.hy - rover.y; return { deg: Math.atan2(dy, dx) * 180 / Math.PI, dir: gridDir(dx, dy) }; }
+
+// Click modes for single clicks (inspect / target / heading) in either view. Returns a message.
+function applyMode(res) {
+  const m = $("mode").value;
+  if (m === "target") { target = { x: (res.col + .5) / cols(), y: (res.row + .5) / rows() }; return "target set to " + cname([res.col, res.row]); }
+  if (m === "heading") {
+    if (!rover) return "draw the rover footprint first: rejected";
+    if (Math.hypot(res.x - rover.x, res.y - rover.y) < 0.03) return "forward point too close to the rover centre: rejected";
+    rover.hx = res.x; rover.hy = res.y; return "forward direction set (separately from the rectangle)";
+  }
+  return "";
+}
+function handleCell(res, extra) {
+  clicked = res; show(res, extra);
+  const m = $("mode").value;
+  if (!res.error && (m === "target" || m === "heading")) { $("result").textContent += "\n" + applyMode(res); replan(); }
+  draw();
+}
+
+// Inverse-map each top-view pixel into the source image (bilinear).
+function warp() {
+  const W = tv.width, Hh = tv.height;
+  const c = document.createElement("canvas"); c.width = img.width; c.height = img.height;
+  const cx = c.getContext("2d"); cx.drawImage(img, 0, 0);
+  const sd = cx.getImageData(0, 0, img.width, img.height).data;
+  const out = tctx.createImageData(W, Hh), od = out.data;
+  for (let j = 0; j < Hh; j++) for (let i = 0; i < W; i++) {
+    const p = HG.apply(cal.Hi, (i + 0.5) / W, 1 - (j + 0.5) / Hh); // y up
+    const o = (j * W + i) * 4;
+    if (!p || p[0] < 0 || p[1] < 0 || p[0] > img.width - 1 || p[1] > img.height - 1) { od[o + 3] = 255; continue; }
+    const x0 = Math.floor(p[0]), y0 = Math.floor(p[1]), fx = p[0] - x0, fy = p[1] - y0;
+    const x1 = Math.min(x0 + 1, img.width - 1), y1 = Math.min(y0 + 1, img.height - 1);
+    for (let k = 0; k < 3; k++) {
+      const a = sd[(y0 * img.width + x0) * 4 + k], b = sd[(y0 * img.width + x1) * 4 + k],
+            d = sd[(y1 * img.width + x0) * 4 + k], e = sd[(y1 * img.width + x1) * 4 + k];
+      od[o + k] = (a * (1 - fx) + b * fx) * (1 - fy) + (d * (1 - fx) + e * fx) * fy;
+    }
+    od[o + 3] = 255;
+  }
+  return out;
+}
+
+function selRect() { if (!sel) return null; return sel.kind === "obst" ? obstacles[sel.i] || null : (rover ? rover.rect : null); }
+
+function draw(live) {
+  const s = img.width / 1280; // line width scale
+  sctx.drawImage(img, 0, 0);
+  if (!err) {
+    sctx.lineWidth = 3 * s; sctx.strokeStyle = "#00ffd0"; sctx.beginPath();
+    corners.forEach((p, i) => i ? sctx.lineTo(p[0], p[1]) : sctx.moveTo(p[0], p[1])); sctx.closePath(); sctx.stroke();
+    const C = cols(), R = rows(), W = tv.width, Hh = tv.height;
+    const labelSrc = C <= 12;
+    sctx.lineWidth = 1 * s; sctx.strokeStyle = "rgba(255,255,0,.7)";
+    const seg = (a, b) => { const p = HG.apply(cal.Hi, a[0], a[1]), q = HG.apply(cal.Hi, b[0], b[1]); sctx.beginPath(); sctx.moveTo(p[0], p[1]); sctx.lineTo(q[0], q[1]); sctx.stroke(); };
+    for (let i = 1; i < C; i++) seg([i / C, 0], [i / C, 1]);
+    for (let j = 1; j < R; j++) seg([0, j / R], [1, j / R]);
+    if (labelSrc) { sctx.fillStyle = "rgba(255,255,0,.95)"; sctx.font = (13 * s) + "px sans-serif"; sctx.textAlign = "center";
+      for (let i = 0; i < C; i++) for (let j = 0; j < R; j++) { const p = HG.apply(cal.Hi, (i + .5) / C, (j + .5) / R); sctx.fillText(HG.colName(i) + (j + 1), p[0], p[1] + 4 * s); } }
+    if (!live) {
+      tctx.putImageData(warped, 0, 0);
+      tctx.lineWidth = 1; tctx.strokeStyle = "rgba(255,255,0,.7)"; tctx.fillStyle = "rgba(255,255,0,.9)"; tctx.font = (C > 12 ? 9 : 13) + "px sans-serif"; tctx.textAlign = "center";
+      for (let i = 1; i < C; i++) { tctx.beginPath(); tctx.moveTo(i * W / C, 0); tctx.lineTo(i * W / C, Hh); tctx.stroke(); }
+      for (let j = 1; j < R; j++) { tctx.beginPath(); tctx.moveTo(0, Hh - j * Hh / R); tctx.lineTo(W, Hh - j * Hh / R); tctx.stroke(); }
+      for (let i = 0; i < C; i++) for (let j = 0; j < R; j++) tctx.fillText(HG.colName(i) + (j + 1), (i + .5) * W / C, Hh - (j + .5) * Hh / R + 3);
+      tctx.strokeStyle = "#00ffd0"; tctx.lineWidth = 3; tctx.strokeRect(1, 1, W - 2, Hh - 2);
+    }
+    const toSrc = (x, y) => HG.apply(cal.Hi, x, y), toTop = (x, y) => [x * W, Hh - y * Hh];
+    const poly = (ctx, pts, f) => { ctx.beginPath(); pts.forEach(([a, b], i) => { const q = f(a, b); i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1]); }); ctx.closePath(); };
+    const rectPts = r => [[r.x0, r.y0], [r.x1, r.y0], [r.x1, r.y1], [r.x0, r.y1]];
+    const cellQuad = (ctx, c, r, f) => { poly(ctx, [[c / C, r / R], [(c + 1) / C, r / R], [(c + 1) / C, (r + 1) / R], [c / C, (r + 1) / R]], f); ctx.fill(); };
+    const tag = (ctx, p, txt, col, sz) => { ctx.fillStyle = col; ctx.font = "bold " + sz + "px sans-serif"; ctx.textAlign = "center"; ctx.strokeStyle = "#000"; ctx.lineWidth = sz / 5; ctx.strokeText(txt, p[0], p[1] - sz * 0.9); ctx.fillText(txt, p[0], p[1] - sz * 0.9); };
+    const paint = (ctx, f, sz, lw, isTop) => {
+      const occ = occupiedSet();
+      if (roverSize) { // margin zone (orange) = planning-blocked minus occupied
+        ctx.fillStyle = "rgba(255,150,0,.20)";
+        HG.planningBlocked(obstacles, C, R, planRadius()).forEach(k => { if (!occ.has(k)) { const [c, r] = k.split(",").map(Number); cellQuad(ctx, c, r, f); } });
+      }
+      ctx.fillStyle = "rgba(255,40,40,.40)";
+      occ.forEach(k => { const [c, r] = k.split(",").map(Number); cellQuad(ctx, c, r, f); });
+      obstacles.forEach((r, i) => { // obstacle footprints
+        const on = sel && sel.kind === "obst" && sel.i === i;
+        ctx.lineWidth = lw * (on ? 1.6 : 1.1); ctx.strokeStyle = on ? "#ffffff" : "#ff3b3b"; ctx.setLineDash(r.auto ? [8, 5] : []); poly(ctx, rectPts(r), f); ctx.stroke(); ctx.setLineDash([]);
+        tag(ctx, f((r.x0 + r.x1) / 2, (r.y0 + r.y1) / 2), "#" + (i + 1), "#ffb0b0", sz * 0.9);
+      });
+      if (route && route.length > 1) {
+        ctx.lineWidth = lw; ctx.strokeStyle = "#ff40ff"; ctx.lineJoin = "round"; ctx.beginPath();
+        route.forEach((p, i) => { const q = f(...HG.cellCentre(p[0], p[1], C, R)); i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1]); }); ctx.stroke();
+      }
+      if (route) route.forEach(p => { const q = f(...HG.cellCentre(p[0], p[1], C, R)); ctx.beginPath(); ctx.arc(q[0], q[1], lw * 1.0, 0, 7); ctx.fillStyle = "#ff40ff"; ctx.fill(); });
+      if (hints) {
+        const hp = (px, py) => f(...HG.apply(cal.H, px, py));
+        ctx.setLineDash([lw * 2, lw * 2]); ctx.lineWidth = lw;
+        (hints.candidates || []).forEach(h => { const q = hp(h[0], h[1]); ctx.strokeStyle = "#ffa500"; ctx.beginPath(); ctx.arc(q[0], q[1], sz * 1.1, 0, 7); ctx.stroke(); });
+        if (hints.rover) { const q = hp(hints.rover[0], hints.rover[1]); ctx.strokeStyle = "#00e5ff"; ctx.beginPath(); ctx.arc(q[0], q[1], sz * 1.5, 0, 7); ctx.stroke(); }
+        ctx.setLineDash([]);
+      }
+      if (target && roverSize) { // rover-sized footprint at the target cell
+        const tc = targetCell(), cc = HG.cellCentre(tc[0], tc[1], C, R);
+        ctx.setLineDash([lw * 2, lw]); ctx.lineWidth = lw; ctx.strokeStyle = "#5ab0ff";
+        poly(ctx, rectPts({ x0: cc[0] - roverSize.w / 2, x1: cc[0] + roverSize.w / 2, y0: cc[1] - roverSize.h / 2, y1: cc[1] + roverSize.h / 2 }), f); ctx.stroke(); ctx.setLineDash([]);
+      }
+      if (rover) {
+        const r = rover.rect, on = sel && sel.kind === "rover";
+        ctx.lineWidth = lw * (on ? 1.8 : 1.3); ctx.strokeStyle = "#3dff6a"; ctx.fillStyle = "rgba(61,255,106,.18)"; poly(ctx, rectPts(r), f); ctx.fill(); ctx.stroke();
+        const q = f(rover.x, rover.y); ctx.fillStyle = "#3dff6a"; ctx.beginPath(); ctx.arc(q[0], q[1], lw * 1.6, 0, 7); ctx.fill();
+        if (roverSize) { ctx.setLineDash([lw, lw * 1.5]); ctx.lineWidth = lw * 0.8; ctx.strokeStyle = "rgba(61,255,106,.8)"; // planning radius circle (circle in normalized units)
+          ctx.beginPath(); for (let a = 0; a <= 48; a++) { const t = a / 48 * 2 * Math.PI, p = f(rover.x + planRadius() * Math.cos(t), rover.y + planRadius() * Math.sin(t)); a ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]); } ctx.stroke(); ctx.setLineDash([]); }
+        if (rover.hx != null) { const h = f(rover.hx, rover.hy); ctx.lineWidth = lw * 1.3; ctx.strokeStyle = "#3dff6a"; ctx.beginPath(); ctx.moveTo(q[0], q[1]); ctx.lineTo(h[0], h[1]); ctx.stroke();
+          const ang = Math.atan2(h[1] - q[1], h[0] - q[0]), L = lw * 5; ctx.beginPath(); ctx.moveTo(h[0], h[1]); ctx.lineTo(h[0] - L * Math.cos(ang - .5), h[1] - L * Math.sin(ang - .5)); ctx.lineTo(h[0] - L * Math.cos(ang + .5), h[1] - L * Math.sin(ang + .5)); ctx.closePath(); ctx.fill(); }
+        tag(ctx, q, "ROVER", "#3dff6a", sz);
+      }
+      if (target) tag(ctx, f(target.x, target.y), "TARGET", "#5ab0ff", sz);
+    };
+    paint(sctx, toSrc, 14 * s, 2.5 * s, false);
+    if (!live) {
+      paint(tctx, toTop, 14, 2, true);
+      const r = selRect(); // resize handles in the flattened view
+      if (r) rectPts(r).forEach(([a, b]) => { const q = toTop(a, b); tctx.fillStyle = "#fff"; tctx.strokeStyle = "#000"; tctx.lineWidth = 1.5; tctx.fillRect(q[0] - 5, q[1] - 5, 10, 10); tctx.strokeRect(q[0] - 5, q[1] - 5, 10, 10); });
+      if (dragRect && dragRect.rect) { tctx.setLineDash([6, 4]); tctx.lineWidth = 2; tctx.strokeStyle = dragRect.kind === "rover" ? "#3dff6a" : "#ffffff"; poly(tctx, rectPts(dragRect.rect), toTop); tctx.stroke(); tctx.setLineDash([]); }
+      if (clicked && !clicked.error) {
+        const p = HG.apply(cal.Hi, clicked.x, clicked.y);
+        mark(sctx, p[0], p[1], 10 * s, s); mark(tctx, clicked.x * W, Hh - clicked.y * Hh, 10, 1);
+      }
+    }
+  } else if (!live) {
+    tctx.fillStyle = "#300"; tctx.fillRect(0, 0, tv.width, tv.height);
+    tctx.fillStyle = "#fff"; tctx.font = "16px sans-serif"; tctx.textAlign = "center"; tctx.fillText("No valid calibration: " + err, tv.width / 2, tv.height / 2);
+  }
+  corners.forEach((p, i) => { // handles always drawn so an invalid boundary can be fixed
+    sctx.beginPath(); sctx.arc(p[0], p[1], 9 * s, 0, 7); sctx.fillStyle = COLORS[i]; sctx.fill();
+    sctx.lineWidth = 2 * s; sctx.strokeStyle = "#000"; sctx.stroke();
+    sctx.fillStyle = "#fff"; sctx.strokeStyle = "#000"; sctx.font = "bold " + (14 * s) + "px sans-serif"; sctx.textAlign = "left";
+    sctx.strokeText(NAMES[i], p[0] + 13 * s, p[1] - 10 * s); sctx.fillText(NAMES[i], p[0] + 13 * s, p[1] - 10 * s);
+  });
+}
+function mark(ctx, x, y, r, s) {
+  ctx.lineWidth = 3 * s; ctx.strokeStyle = "#ff2222"; ctx.beginPath(); ctx.arc(x, y, r, 0, 7); ctx.moveTo(x - r * 1.6, y); ctx.lineTo(x + r * 1.6, y); ctx.moveTo(x, y - r * 1.6); ctx.lineTo(x, y + r * 1.6); ctx.stroke();
+}
+
+// Map a pointer event to canvas-internal pixels, accounting for CSS scaling.
+function evPos(ev, canvas) {
+  const r = canvas.getBoundingClientRect();
+  return [(ev.clientX - r.left) * canvas.width / r.width, (ev.clientY - r.top) * canvas.height / r.height];
+}
+function show(res, extra) {
+  const el = $("result");
+  if (res.error) { el.textContent = "REJECTED: " + res.error + (res.x !== undefined ? "\n(would be x=" + res.x.toFixed(3) + ", y=" + res.y.toFixed(3) + ")" : ""); el.style.color = "#ff8080"; }
+  else { el.style.color = ""; el.textContent = "x = " + res.x.toFixed(3) + "\ny = " + res.y.toFixed(3) + "\ncell = " + res.cell + "  (col " + (res.col + 1) + "/" + cols() + ", row " + (res.row + 1) + "/" + rows() + ")" + (extra || ""); }
+}
+
+// ---- original photo: boundary handles + single clicks ----
+src.addEventListener("pointerdown", ev => {
+  if (!img) return;
+  const [x, y] = evPos(ev, src), scale = src.getBoundingClientRect().width / src.width;
+  drag = -1; let best = 16 / scale;
+  corners.forEach((p, i) => { const d = Math.hypot(p[0] - x, p[1] - y); if (d < best) { best = d; drag = i; } });
+  if (drag >= 0) { moved = false; src.setPointerCapture(ev.pointerId); return; }
+  if (err) { show({ error: "no valid calibration: " + err }); return; }
+  handleCell(HG.pixelToCell(cal, x, y, cols(), rows()), "\n(source pixel " + x.toFixed(0) + ", " + y.toFixed(0) + ")");
+});
+src.addEventListener("pointermove", ev => {
+  if (drag < 0) return;
+  const [x, y] = evPos(ev, src); moved = true;
+  corners[drag] = [Math.min(Math.max(x, 0), img.width), Math.min(Math.max(y, 0), img.height)];
+  cal = HG.calibrate(corners, img.width, img.height); err = cal.error || "";
+  setStatus(!err, err ? "INVALID: " + err : "calibrated"); clicked = null;
+  draw(true); // heavy warp deferred to pointerup
+});
+src.addEventListener("pointerup", () => {
+  if (drag >= 0) {
+    drag = -1;
+    const had = moved && !scenarioEmpty();
+    if (moved) { rover = null; confirmed = false; fconfirmed = false; }
+    update();
+    if (had) $("route").textContent = "Boundary changed: footprints are stored in sandbox coordinates, so they moved with the boundary. Rover pose cleared. Re-check everything, then confirm alignment and footprints again.";
+  }
+});
+
+// ---- flattened view: rectangle drawing / selecting / resizing, otherwise single clicks ----
+function tvEvent(ev) { const [px, py] = evPos(ev, tv); return { px, py, n: [Math.min(1, Math.max(0, px / tv.width)), Math.min(1, Math.max(0, 1 - py / tv.height))] }; }
+function hitHandle(px, py) {
+  const r = selRect(); if (!r) return null;
+  for (const [a, b] of [[r.x0, r.y0], [r.x1, r.y0], [r.x1, r.y1], [r.x0, r.y1]])
+    if (Math.hypot(px - a * tv.width, py - (1 - b) * tv.height) < 12) return [a === r.x0 ? r.x1 : r.x0, b === r.y0 ? r.y1 : r.y0]; // returns the fixed (opposite) corner
+  return null;
+}
+tv.addEventListener("pointerdown", ev => {
+  if (err) { show({ error: "no valid calibration: " + err }); return; }
+  const { px, py, n } = tvEvent(ev), m = $("mode").value;
+  if (m === "obst" || m === "roverbox") {
+    const kind = m === "obst" ? "obst" : "rover", fixed = hitHandle(px, py);
+    if (fixed && sel && sel.kind === kind) { dragRect = { op: "resize", kind, i: sel.i, fixed, rect: null }; }
+    else {
+      let inside = -1;
+      if (kind === "obst") obstacles.forEach((r, i) => { if (n[0] >= r.x0 && n[0] <= r.x1 && n[1] >= r.y0 && n[1] <= r.y1) inside = i; });
+      else if (rover && n[0] >= rover.rect.x0 && n[0] <= rover.rect.x1 && n[1] >= rover.rect.y0 && n[1] <= rover.rect.y1) inside = 0;
+      dragRect = { op: "new", kind, a: n, rect: null, inside };
+    }
+    try { tv.setPointerCapture(ev.pointerId); } catch (e) {} return;
+  }
+  const res = HG.normToCell(n[0], n[1], cols(), rows());
+  handleCell(res, "\n(clicked in flattened view)");
+});
+tv.addEventListener("pointermove", ev => {
+  if (!dragRect) return;
+  const { n } = tvEvent(ev), from = dragRect.op === "new" ? dragRect.a : dragRect.fixed;
+  dragRect.rect = HG.normRect(from[0], from[1], n[0], n[1]); draw();
+});
+tv.addEventListener("pointerup", () => {
+  if (!dragRect) return;
+  const d = dragRect; dragRect = null; const r = d.rect, big = r && r.x1 - r.x0 >= MINSZ && r.y1 - r.y0 >= MINSZ;
+  if (d.op === "new" && !big) { // a click: select the footprint under it (if any)
+    sel = d.inside >= 0 ? { kind: d.kind, i: d.inside } : null; $("result").textContent = sel ? "Selected " + (d.kind === "obst" ? "obstacle #" + (d.inside + 1) : "rover footprint") + ". Drag a corner to resize; Delete removes it." : "Drag to draw a rectangle.";
+  } else if (big) {
+    if (d.kind === "obst") { if (d.op === "new") { obstacles.push(r); sel = { kind: "obst", i: obstacles.length - 1 }; } else obstacles[d.i] = r; }
+    else { setRoverRect(r); sel = { kind: "rover", i: 0 }; }
+  }
+  replan(); draw();
+});
+function setRoverRect(r) {
+  const [cx, cy] = HG.rectCentre(r), [w, h] = HG.rectSize(r);
+  const keepHead = rover && rover.hx != null && Math.hypot(cx - rover.x, cy - rover.y) < 1e-9; // forward direction is never inferred from the rectangle
+  rover = { x: cx, y: cy, hx: keepHead ? rover.hx : null, hy: keepHead ? rover.hy : null, rect: r };
+  roverSize = { w, h };
+  $("result").textContent = "Rover footprint " + f3(w) + " x " + f3(h) + " (normalized), centre (" + f3(cx) + ", " + f3(cy) + ") in " + cname(cellOf(cx, cy)) + ". Now use 'Set rover forward direction' and click in front of the rover.";
+}
+function deleteSelected() {
+  if (!sel) { $("result").textContent = "Nothing selected."; return; }
+  if (sel.kind === "obst") obstacles.splice(sel.i, 1); else { rover = null; roverSize = null; }
+  sel = null; replan(); draw();
+}
+$("delfp").onclick = deleteSelected;
+document.addEventListener("keydown", e => {
+  if ((e.key === "Delete" || e.key === "Backspace") && !/INPUT|SELECT|TEXTAREA/.test((e.target.tagName || ""))) { e.preventDefault(); deleteSelected(); }
+});
+
+function gridChanged() { clicked = null; if (!img) return; replan(); $("result").textContent = "Grid / margin changed: footprints kept in normalized coordinates, occupied cells recomputed."; draw(); }
+$("cols").onchange = $("rows").onchange = $("margin").onchange = gridChanged;
+$("clearsc").onclick = () => { clearScenario(); replan(); draw(); };
+$("loadsc").onclick = async () => {
+  const c = await fetch("/corners"); if (!c.ok) { $("result").textContent = "Nothing saved yet."; return; }
+  const sv = await c.json(); clearScenario(); corners = sv.corners; confirmed = false; fconfirmed = false; const note = applyScenario(sv); clicked = null; update();
+  $("route").textContent = (note || "No scenario in saved file.") + "\n" + $("route").textContent;
+};
+$("reset").onclick = () => { corners = DEFAULT_FRAC.map(([fx, fy]) => [fx * img.width, fy * img.height]); clicked = null; rover = null; confirmed = false; fconfirmed = false; update(); };
+$("save").onclick = async () => {
+  const r = await fetch("/corners", { method: "POST", body: JSON.stringify({ corners, image_size: [img.width, img.height], hints, scenario: scenarioPayload() }) });
+  $("result").textContent = r.ok ? "Boundary + scenario saved" : "Save failed: " + r.status;
+};
+$("reload").onclick = () => reloadImage().catch(e => setStatus(false, "reload error: " + e));
+$("confirm").onclick = () => { if (err) { $("route").textContent = "Cannot confirm: " + err; return; } confirmed = true; replan(); draw(); };
+$("confirmfp").onclick = () => { fconfirmed = true; replan(); draw(); };
+
+// ---- Take photo: the server captures on the aerial Zero, then we reload it (pose and confirmations reset) ----
+$("shoot").onclick = async () => {
+  $("shoot").disabled = true; $("shoot").textContent = "Taking photo...";
+  try {
+    const [c, j] = await api("/api/capture", {});
+    if (c !== 200) { $("route").textContent = "Take photo failed: " + (j.error || c) + "\n" + $("route").textContent; return; }
+    await reloadImage();
+  } catch (e) { setStatus(false, "photo error: " + e); }
+  finally { $("shoot").disabled = false; $("shoot").textContent = "Take photo"; }
+};
+
+// ---- automatic rubble detection (server runs detect.py: BEFORE photo vs current photo) ----
+function note(msg) { $("route").textContent = msg + "\n" + $("route").textContent; }
+$("setbefore").onclick = async () => {
+  if (!img) return;
+  const [c, j] = await api("/api/before", {});
+  note(c === 200 ? "BEFORE saved from the current photo. Add the rubble, take a new photo, Reload image, confirm the boundary, then Detect rubble."
+                 : "Save as BEFORE failed: " + (j.error || c));
+};
+$("detect").onclick = async () => {
+  if (err || !confirmed) { note("Confirm the boundary alignment on this photo before detecting."); return; }
+  const exclude = rover && rover.rect ? [rover.rect] : [];  // never call the rover rubble
+  $("detect").disabled = true;
+  try {
+    const [c, j] = await api("/api/detect", { corners, exclude, cols: cols(), rows: rows(), image_mtime: imgMtimeS });
+    if (c !== 200) { note("Detect rubble failed: " + (j.error || c)); return; }
+    const manual = obstacles.filter(o => !o.auto);
+    obstacles = manual.concat(j.obstacles.map(o => ({ x0: o.x0, y0: o.y0, x1: o.x1, y1: o.y1, auto: true })));
+    sel = null; fconfirmed = false; replan(); draw();
+    note("Detected " + j.obstacles.length + " rubble footprint(s) covering " + (j.blocked.length ? j.blocked.join(" ") : "no cells") +
+         ". Check them against the photo (detection view), fix any by hand, then Confirm footprints.");
+  } finally { $("detect").disabled = false; }
+};
+
+// ---- manual rover control (server enforces: --enable-motion, armed, fresh photo, STOP always allowed) ----
+async function api(path, body) {
+  const r = await fetch(path, { method: "POST", headers: { "X-Requested-With": "overhead-viewer" }, body: JSON.stringify(body || {}) });
+  let j = {}; try { j = await r.json(); } catch (e) {}
+  return [r.status, j];
+}
+function moveGate() {
+  if (!srv) return "rover server not reachable";
+  if (!srv.motion_enabled) return "motion DISABLED (server started without --enable-motion)";
+  if (!srv.armed) return "not armed";
+  if (err || !confirmed) return "boundary not confirmed";
+  if (!fconfirmed) return "footprints not confirmed";
+  if (!rover || rover.hx == null) return "draw the rover footprint and set its forward direction on the current photo";
+  if (!srv.fresh_observation) return "need a NEW photo taken after the last command";
+  if (Math.abs(srv.image_mtime - imgMtimeS) > 1e-3) return "press Reload image (a newer photo is on disk)";
+  return "";
+}
+function renderMotion() {
+  const gate = moveGate(), ok = !gate;
+  document.querySelectorAll("#mbtns button").forEach(b => b.disabled = !ok);
+  $("arm").disabled = !(srv && srv.motion_enabled); $("arm").checked = !!(srv && srv.armed);
+  $("mstate").textContent = srv ? (srv.motion_enabled ? "(motion allowed: arm to use)" : "(motion OFF)") + (srv.dry_run ? " [DRY RUN]" : "") : "(server unreachable)";
+  if (!$("mmsg").dataset.pin) $("mmsg").textContent = ok ? "Ready: one short burst per photo." : "Moves blocked: " + gate + (srv && srv.last_event ? " | last: " + srv.last_event : "");
+}
+async function pollState() { try { srv = await (await fetch("/api/state")).json(); } catch (e) { srv = null; } renderMotion(); }
+function afterMotion(msg) {
+  rover = null; route = null; replan(); draw();
+  $("mmsg").dataset.pin = "1"; $("mmsg").textContent = msg;
+  setTimeout(() => { delete $("mmsg").dataset.pin; }, 15000);
+}
+async function doStop() {
+  const [c, b] = await api("/api/stop");
+  afterMotion(c === 200 ? "STOP sent. Motion disarmed. Take a new photo and reload before continuing." : "STOP FAILED to send (" + (b.error || c) + "). Use the rover's physical button / power off.");
+  pollState();
+}
+document.querySelectorAll("#mbtns button").forEach(b => b.onclick = async () => {
+  if (moveGate()) return;
+  b.disabled = true;
+  const [c, j] = await api("/api/move", { cmd: b.dataset.c, duration: parseFloat($("dur").value), image_mtime: imgMtimeS });
+  afterMotion(c === 200 ? "Moved " + b.dataset.c + " for " + $("dur").value + " s then STOP. Pose invalid: take a NEW photo, Reload image, re-set pose." : "Move REFUSED/FAILED: " + (j.error || c) + ". New observation required.");
+  pollState();
+});
+$("stop").onclick = doStop;
+document.addEventListener("keydown", e => { if (e.key === " " || e.key === "Escape") { e.preventDefault(); doStop(); } });
+$("arm").onchange = async () => { const [c, j] = await api("/api/arm", { armed: $("arm").checked }); if (c !== 200) $("mmsg").textContent = "Arm refused: " + (j.error || c); pollState(); };
+setInterval(pollState, 2000); pollState();
+
+load().catch(e => setStatus(false, "error: " + e));
+</script></body></html>

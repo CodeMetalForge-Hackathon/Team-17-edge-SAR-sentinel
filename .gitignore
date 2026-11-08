@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+cache/
+*.joblib
+*.npy
+normal_features.csv
+dashboard_sim.png
+
+# overhead viewer runtime files
+tools/overhead_viewer/before_*.jpg
+tools/overhead_viewer/detect_debug.png
