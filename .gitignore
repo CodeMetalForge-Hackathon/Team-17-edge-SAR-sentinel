@@ -5,3 +5,4 @@ cache/
 *.npy
 normal_features.csv
 dashboard_sim.png
+uno-q-readings/

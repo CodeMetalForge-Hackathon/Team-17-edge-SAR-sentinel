@@ -46,6 +46,12 @@ A separate Wi-Fi controller provides browser-based hold-to-move WASD, release-to
 
 See [the rover setup and validation guide](rover/README.md) for installation, controls, live testing, and failure limits. It does not change the existing `rover_wifi.py` or Wi-Fi/Tailscale settings. No rover-side watchdog is assumed.
 
+## Arduino UNO Q sensor relay
+
+The UNO Q setup uses its running router's local monitor, USB to the Mac, and the Mac's existing SSH/Tailscale connection to a separate sensor log on the Pi. This path was verified with live readings without a firmware upload or changes to Wi-Fi or rover services. The Mac must remain awake and connected; the log is not yet integrated with MQTT or rover policy.
+
+See [the UNO Q setup and verification guide](docs/UNO_Q_SENSOR_RELAY.md). It includes the uploaded Grove/DHT11 sketch, the matching App Lab ADB forwarding command, and `mac/uno_q_relay.py` / `pi/uno_q_log.py` for repeatable foreground logging. On this build, the sketch's `flame` field is a temperature-rise flag, not a physical flame sensor.
+
 ## Owners
 
 | Module | Files | Owner |
