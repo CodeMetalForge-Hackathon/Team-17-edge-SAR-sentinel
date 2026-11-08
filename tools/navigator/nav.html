@@ -77,6 +77,8 @@ function draw(){
   if(img.complete&&img.naturalWidth)ctx.drawImage(img,0,0,cv.width,cv.height);else{ctx.fillStyle="#222";ctx.fillRect(0,0,cv.width,cv.height);ctx.fillStyle="#888";ctx.fillText("waiting for frame + boundary markers",20,30)}
   const dc=S.depth_cells;ctx.fillStyle="rgba(248,81,73,.45)";
   (dc.cells||[]).forEach(([c,r,v])=>{if(v>=0.5)ctx.fillRect(X(c/dc.cols),Y((r+1)/dc.rows),cv.width/dc.cols+1,cv.height/dc.rows+1)});
+  ctx.fillStyle="rgba(210,153,34,.40)";   // no usable depth (holes / never seen): NOT free, the planner treats it as blocked
+  (dc.unknown||[]).forEach(([c,r])=>ctx.fillRect(X(c/dc.cols),Y((r+1)/dc.rows),cv.width/dc.cols+1,cv.height/dc.rows+1));
   ctx.fillStyle="rgba(210,153,34,.5)";ctx.strokeStyle="#d29922";ctx.lineWidth=2;
   S.manual.forEach(r=>{ctx.fillRect(X(r[0]),Y(r[3]),X(r[2])-X(r[0]),Y(r[1])-Y(r[3]));ctx.strokeRect(X(r[0]),Y(r[3]),X(r[2])-X(r[0]),Y(r[1])-Y(r[3]))});
   if(drag&&drag.b){ctx.strokeStyle="#fff";ctx.setLineDash([5,4]);const a=drag.a,b=drag.b;ctx.strokeRect(X(Math.min(a[0],b[0])),Y(Math.max(a[1],b[1])),Math.abs(X(a[0])-X(b[0])),Math.abs(Y(a[1])-Y(b[1])));ctx.setLineDash([])}
@@ -94,7 +96,7 @@ function chip(t,c){return `<span class="chip ${c}">${t}</span>`}
 function ui(){
   const s=S,n=s.nav,c=s.calib;
   $("badge").textContent=n.state.toUpperCase()+(n.cruising?" | CRUISE":"");$("badge").style.color={running:"#58a6ff",done:"#2ea043",failed:"#f85149",idle:"#e6edf3"}[n.state];
-  $("reason").textContent=n.reason||s.plan_error||"";
+  $("reason").textContent=n.reason||s.plan_error||s.plan_warning||"";
   $("dry").textContent=s.dry_run?"DRY-RUN: no rover commands":(s.motion_enabled?"LIVE UGV link":"motion disabled");$("dry").className="chip "+(s.dry_run?"wn":(s.motion_enabled?"bad":""));
   $("arm").checked=n.armed;$("arm").disabled=!s.motion_enabled;
   $("start").disabled=!(n.armed&&s.target&&n.state!=="running"&&s.pose&&!s.plan_error);$("start").textContent=n.state==="running"?"RUNNING...":"START";

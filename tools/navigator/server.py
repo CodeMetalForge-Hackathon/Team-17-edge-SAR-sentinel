@@ -65,16 +65,28 @@ class App:
     # keeps calibration/map/pose display fresh while idle (no motion is ever commanded from here)
     def _bg(self):
         last = -1
+        last_full = -1
         while True:
             try:
                 if self.nav.state != "running":
                     fr = self.src.latest()
-                    if fr is not None and fr.seq != last:
+                    # The map is built from the latest FULL frame, looked up separately: a small rover-window frame usually
+                    # arrives ~0.1 s after a full one, so keying on latest() alone missed full frames (an explicit refresh
+                    # or the once-a-minute update could be skipped until the next full frame, a minute later).
+                    full = self._full()
+                    if full is not None and not getattr(full, "partial", False) and full.seq != last_full and full.seq != last \
+                            and self._map_due():
+                        last_full = last = full.seq
+                        obs = self.per.snapshot(full)            # overview refresh: map from this full frame
+                        if obs.pose:
+                            self.nav.pose = obs.pose
+                        if self.rec:
+                            self._record(full)
+                    elif fr is not None and fr.seq != last:
                         last = fr.seq
-                        if not getattr(fr, "partial", False) and self._map_due():
-                            obs = self.per.snapshot(fr)          # overview refresh: map from this full frame
-                        else:
-                            obs = self.per.process(fr, update_map=False)
+                        if not getattr(fr, "partial", False):
+                            last_full = fr.seq
+                        obs = self.per.process(fr, update_map=False)
                         if obs.pose:
                             self.nav.pose = obs.pose
                         if self.rec:
@@ -147,6 +159,8 @@ class App:
         return {
             "frame": {"seq": fr.seq if fr else None, "age_s": age, "err": getattr(self.src, "err", ""),
                       "fetch_ms": getattr(self.src, "fetch_ms", 0), "size": [fr.cols, fr.rows] if fr else None},
+            "map": {"seq": per.map_seq, "age_s": round(time.time() - per.map_time, 1) if per.map_time else None,
+                    "updates": per.map_frames, "err": per.map_err, "frame_seq": fr.seq if fr else None},
             "calib": {"boundary_live": bool(obs and obs.boundary_live), "boundary_stored": c.corners is not None,
                       "plane": c.plane is not None, "aspect": round(c.aspect, 3), "aspect_measured": c.aspect_measured,
                       "height_mm": hm},
@@ -155,6 +169,9 @@ class App:
             "target": t, "target_info": tinfo,
             "path": path, "sweep": self.sweep(path),
             "plan_error": (res or {}).get("error", ""),
+            "plan_warning": ("" if n.state == "running" or not res or res.get("error") else
+                             (lambda g: ("route drawn, but the guard would stop its first move: " + g + " (the run would stop, refresh the map "
+                                         "and try one guarded alternative)") if g else "")(n.first_move_check(pose, res))),
             "nav": {"state": n.state, "reason": n.reason, "step": n.step, "dist": n.dist, "armed": n.armed,
                     "cruising": n.cruising, "remaining": n.remaining, "arrive_tol_mm": n.cfg["arrive_tol_mm"],
                     "latency_s": n.latency_s,

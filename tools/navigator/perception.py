@@ -101,9 +101,13 @@ class Perception:
         so cells found/cleared by this snapshot settle without waiting for more frames. Rover cells are excluded."""
         with self.lock:
             obs = self._process(frame, True)
-            if obs.pose is not None and self.calib.plane is not None and not getattr(frame, "partial", False):
+            if self.calib.plane is not None and not getattr(frame, "partial", False) and frame.depth is not None:
+                # The repeats must not depend on the rover being found: one EMA step only reaches 0.4 (< the 0.5 occupied
+                # threshold), so a frame where tracking drops would otherwise map every object as free. With no confident
+                # rover pose nothing is excluded (the rover's own cells then show as obstacles, never as free space).
+                rv = [obs.pose] if obs.pose is not None and obs.pose is self.last_pose else None      # last_pose is set only for a confident pose
                 for _ in range(repeats - 1):
-                    self.depth_map.update(frame.depth, self.calib, rover=[obs.pose], rover_exclude=self._rover_exclude())
+                    self.depth_map.update(frame.depth, self.calib, rover=rv, rover_exclude=self._rover_exclude())
             if not getattr(frame, "partial", False):
                 self.map_seq = frame.seq
                 self.map_time = getattr(frame, "rx", None) or time.time()
@@ -126,8 +130,11 @@ class Perception:
             recent = [q for _, q in self._recent]
             lastp = self.last_pose
         pose = V.blob_pose(frame.depth, c, near=near, known=base)       # the rover as it was in THIS frame
-        if pose is not None and self._pattern_seen and V.pattern_heading(frame.bgr, frame.gray, c, frame.depth, pose["px"]) is None:
-            pose = None                                                  # not confidently the rover: exclude nothing for it
+        if pose is not None and self._pattern_seen:
+            if V.pattern_heading(frame.bgr, frame.gray, c, frame.depth, pose["px"]) is None:
+                pose = None                                              # not confidently the rover: exclude nothing for it
+            else:
+                self._to_body(frame, pose, V.dark_body_px(frame.bgr, frame.gray, c, frame.depth, pose["px"]))
         rovers = ([pose] if pose else []) + recent + ([lastp] if lastp else [])
         for _ in range(repeats):
             new.update(frame.depth, c, rover=rovers or None, rover_exclude=self._rover_exclude())
@@ -183,6 +190,7 @@ class Perception:
                 self.warnings = ["camera or markers moved: boundary updated, ground plane will be refit, depth map cleared"]
                 c.set_corners(corners)
                 c.plane, c.aspect_measured, c.height_mm = None, False, None
+                c.set_corr(None)
                 self.depth_map.clear()
                 self.save()
         if c.corners is not None and not partial and (c.plane is None or self.want_ground_refit):
@@ -194,15 +202,19 @@ class Perception:
             near = (self.last_pose["x"], self.last_pose["y"]) if self.last_pose else None
             pose = V.blob_pose(frame.depth, c, near=near, known=self.depth_map)
             raw = V.pattern_heading(frame.bgr, frame.gray, c, frame.depth, pose["px"]) if pose is not None else None
-            if raw is None and self._pattern_seen and (near is not None or self.depth_map.blocked_cells()):
+            body = V.dark_body_px(frame.bgr, frame.gray, c, frame.depth, pose["px"]) if raw is not None else None
+            if raw is None and (near is not None or self.depth_map.blocked_cells()):
                 # identity check: the rover is the blob that carries the marker pattern. A latched or map-filtered blob
-                # (cans, other objects) has none, so look for the rover globally, without the map filter
+                # (cans, other objects, a stale map holding the rover's own cells) has none, so look for the rover globally,
+                # without the map filter. Runs from the first frame: a restart must not latch onto the nearest big object.
                 alt = V.blob_pose(frame.depth, c, near=None, known=None)
                 araw = V.pattern_heading(frame.bgr, frame.gray, c, frame.depth, alt["px"]) if alt is not None else None
                 if araw is not None:
-                    pose, raw = alt, araw
+                    pose, raw, body = alt, araw, V.dark_body_px(frame.bgr, frame.gray, c, frame.depth, alt["px"])
             if pose is not None:
                 pose["verified"] = raw is not None
+                if raw is not None:
+                    self._to_body(frame, pose, body)
                 if raw is not None:
                     self._pattern_seen = True
                     now = time.time()
@@ -241,16 +253,36 @@ class Perception:
         self.stats["ms"] += (time.time() - t_start) * 1000
         return self.last_obs
 
+    def _to_body(self, frame, pose, body):
+        """The rover carries the marker pattern at this blob: take its position from the dark body (wheels included), a much
+        steadier position than the depth blob, which fragments when the dark body returns no depth (stationary sd 1 vs 26 mm)."""
+        c = self.calib
+        if body is None or math.hypot(body[0] - pose["px"][0], body[1] - pose["px"][1]) >= 30:
+            return
+        hgt = pose.get("height_mm")                    # the dark body has no depth of its own: drop it from the blob's height
+        fp = V.foot_at_height(body, c.K, c.plane, hgt) if hgt else V.foot_px(np.array([body], np.float64), frame.depth, c.K, c.plane)[0]
+        nb = c.to_norm([fp])[0]
+        pose["x"], pose["y"], pose["px"], pose["position"] = float(nb[0]), float(nb[1]), [float(body[0]), float(body[1])], "body"
+
     def _fit_ground(self, frame):
         c = self.calib
         mask = np.zeros(frame.depth.shape, np.uint8)
         cv2.fillConvexPoly(mask, c.corners.astype(np.int32), 1)
         mask = cv2.erode(mask, np.ones((9, 9), np.uint8)).astype(bool)
-        plane = V.fit_ground_plane(frame.depth, c.K, mask)
-        if plane is None:
+        seed = V.fit_ground_plane(frame.depth, c.K, mask)
+        if seed is None:
             self.warnings = ["ground plane fit failed (not enough valid depth inside the boundary)"]
             return
-        c.plane = plane
+        fit = V.fit_ground_surface(frame.depth, c.K, mask, plane=seed)      # tabletop pixels only; objects/rover rejected
+        if fit is not None:
+            plane, grid = fit
+            c.plane = plane
+            c.set_corr(grid)
+        else:
+            plane = seed
+            c.plane = plane
+            c.set_corr(None)
+            self.warnings = ["ground surface correction not fitted (plane only): clear-table depth ripple may show as obstacles"]
         self.depth_map.clear()
         self.want_ground_refit = False
         try:
@@ -258,7 +290,8 @@ class Perception:
             c.aspect_measured = True
         except Exception:
             pass
-        self.warnings = []
+        if fit is not None:
+            self.warnings = []
         self.save()
 
     # --- rover size from depth: extents of the raised pixels around the rover along/across its heading
@@ -278,8 +311,8 @@ class Perception:
         ys, xs, z = ys[ok], xs[ok], z[ok]
         fx, fy, cx, cy = K
         Pt = np.stack([(xs - cx) * z / fx, (ys - cy) * z / fy, z], 1)
-        h = d - Pt @ n
-        keep = h > 35.0
+        h = d - Pt @ n - c.corr_full(frame.depth.shape)[ys, xs]
+        keep = h > V.H_MIN_MM
         if keep.sum() < 50:
             return
         Pf = Pt[keep] + n[None, :] * h[keep][:, None]
