@@ -1,7 +1,0 @@
-__pycache__/
-*.pyc
-cache/
-*.joblib
-*.npy
-normal_features.csv
-dashboard_sim.png
