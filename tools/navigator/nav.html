@@ -28,7 +28,7 @@ select{background:#0d1117;color:var(--tx);border:1px solid #30363d;border-radius
 <div>
  <div class="pn">
   <div class="row"><b>Pinpoint the destination</b><span class="chip">click the ground map or the live image</span>
-   <select id="mode"><option value="target">Set target</option><option value="box">Draw obstacle box</option><option value="del">Delete obstacle box</option></select></div>
+   <select id="mode"><option value="target">Set target</option><option value="box">Draw obstacle box</option><option value="del">Delete obstacle box</option><option value="mark">Mark structure area (drag)</option><option value="ignore">Ignore area: not a structure (drag)</option><option value="unarea">Remove marked/ignored area (click)</option></select></div>
   <div id="msg"></div>
   <h3>Ground map (top-down, to scale)</h3>
   <canvas id="cv" width="720" height="240"></canvas>
@@ -100,6 +100,11 @@ function draw(){
   if(S.mission){ctx.font="bold 13px sans-serif";S.mission.structures.forEach(x=>{ctx.fillStyle=x.status==="complete"?"#2ea043":(x.status==="unreachable"||x.status==="failed"?"#f85149":"#fff");ctx.fillText(x.label,X(x.x)-8,Y(x.y)-6)})}
   ctx.fillStyle="rgba(210,153,34,.5)";ctx.strokeStyle="#d29922";ctx.lineWidth=2;
   S.manual.forEach(r=>{ctx.fillRect(X(r[0]),Y(r[3]),X(r[2])-X(r[0]),Y(r[1])-Y(r[3]));ctx.strokeRect(X(r[0]),Y(r[3]),X(r[2])-X(r[0]),Y(r[1])-Y(r[3]))});
+  if(S.areas){ctx.lineWidth=2;ctx.setLineDash([6,4]);
+   S.areas.mark.forEach(r=>{ctx.fillStyle="rgba(46,160,67,.25)";ctx.strokeStyle="#2ea043";ctx.fillRect(X(r[0]),Y(r[3]),X(r[2])-X(r[0]),Y(r[1])-Y(r[3]));ctx.strokeRect(X(r[0]),Y(r[3]),X(r[2])-X(r[0]),Y(r[1])-Y(r[3]))});
+   S.areas.ignore.forEach(r=>{ctx.fillStyle="rgba(139,148,158,.35)";ctx.strokeStyle="#8b949e";ctx.fillRect(X(r[0]),Y(r[3]),X(r[2])-X(r[0]),Y(r[1])-Y(r[3]));ctx.strokeRect(X(r[0]),Y(r[3]),X(r[2])-X(r[0]),Y(r[1])-Y(r[3]));
+     ctx.beginPath();ctx.moveTo(X(r[0]),Y(r[3]));ctx.lineTo(X(r[2]),Y(r[1]));ctx.moveTo(X(r[0]),Y(r[1]));ctx.lineTo(X(r[2]),Y(r[3]));ctx.stroke()});
+   ctx.setLineDash([])}
   if(drag&&drag.b){ctx.strokeStyle="#fff";ctx.setLineDash([5,4]);const a=drag.a,b=drag.b;ctx.strokeRect(X(Math.min(a[0],b[0])),Y(Math.max(a[1],b[1])),Math.abs(X(a[0])-X(b[0])),Math.abs(Y(a[1])-Y(b[1])));ctx.setLineDash([])}
   const sw=S.sweep,hc=cv.height;
   if(sw&&sw.L){ctx.strokeStyle="rgba(57,197,207,.45)";ctx.lineWidth=1;sw.rects.forEach(r=>rr(X(r[0]),Y(r[1]),r[2],sw.L*hc,sw.W*hc));
@@ -159,11 +164,16 @@ async function poll(){
 poll();
 cv.addEventListener("pointerdown",e=>{if(!S)return;const p=toNorm(e),m=$("mode").value;
   if(m==="target")pick({x:p[0],y:p[1]});
+  else if(m==="unarea"){const A={mark:S.areas.mark.slice(),ignore:S.areas.ignore.slice()};let hit=false;
+    for(const k of ["mark","ignore"]){const i=A[k].findIndex(r=>p[0]>=r[0]&&p[0]<=r[2]&&p[1]>=r[1]&&p[1]<=r[3]);if(i>=0){A[k].splice(i,1);hit=true;break}}
+    if(hit)post("/api/areas",A).then(r=>{if(r.error)say(r.error)})}
   else if(m==="del"){const k=S.manual.findIndex(r=>p[0]>=r[0]&&p[0]<=r[2]&&p[1]>=r[1]&&p[1]<=r[3]);if(k>=0){const rs=S.manual.slice();rs.splice(k,1);post("/api/manual",{rects:rs})}}
   else{drag={a:p,b:p};try{cv.setPointerCapture(e.pointerId)}catch(_){}}});
 cv.addEventListener("pointermove",e=>{if(drag){drag.b=toNorm(e);draw()}});
 cv.addEventListener("pointerup",e=>{if(!drag)return;const a=drag.a,b=toNorm(e);drag=null;
-  const r=[Math.min(a[0],b[0]),Math.min(a[1],b[1]),Math.max(a[0],b[0]),Math.max(a[1],b[1])];if(r[2]-r[0]>0.01&&r[3]-r[1]>0.01)post("/api/manual",{rects:S.manual.concat([r])})});
+  const r=[Math.min(a[0],b[0]),Math.min(a[1],b[1]),Math.max(a[0],b[0]),Math.max(a[1],b[1])];if(r[2]-r[0]>0.01&&r[3]-r[1]>0.01){const m=$("mode").value;
+   if(m==="mark"||m==="ignore"){const A={mark:S.areas.mark.slice(),ignore:S.areas.ignore.slice()};A[m].push(r);post("/api/areas",A).then(q=>{if(q.error)say(q.error)})}
+   else post("/api/manual",{rects:S.manual.concat([r])})}});
 $("live").addEventListener("click",e=>{if(!S||!S.frame.size)return;const r=e.target.getBoundingClientRect();
   pick({px:(e.clientX-r.left)/r.width*S.frame.size[0],py:(e.clientY-r.top)/r.height*S.frame.size[1]})});
 $("arm").onchange=async e=>{const r=await post("/api/arm",{armed:e.target.checked});if(r.error){say(r.error);e.target.checked=false}};

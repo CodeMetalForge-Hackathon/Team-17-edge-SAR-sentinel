@@ -85,8 +85,12 @@ def detect_structures(per, nav):
         L, W, _m = nav.footprint()
         rad = math.hypot(L, W) / 2 * hm + 10.0
         mask &= np.hypot(u - rv["x"] * A * hm, v - rv["y"] * hm) > rad
+    # operator areas: nothing detected inside an "ignore" area (phantoms) or a "mark" area (that one is added whole below)
+    xn, yn = (cc + 0.5) / cols, (rr + 0.5) / rows
+    for r in list(getattr(per, "ignore_areas", [])) + list(getattr(per, "mark_areas", [])):
+        mask &= ~((xn >= r[0]) & (xn <= r[2]) & (yn >= r[1]) & (yn <= r[3]))
     if not mask.any():
-        return []
+        return _marked_structures(per, cols, rows)
     dx, dy = max(1, int(math.ceil(MERGE_MM / 2 / cw))), max(1, int(math.ceil(MERGE_MM / 2 / ch)))
     grown = cv2.dilate(mask.astype(np.uint8), np.ones((2 * dy + 1, 2 * dx + 1), np.uint8))
     n, lab = cv2.connectedComponents(grown, connectivity=8)
@@ -105,6 +109,20 @@ def detect_structures(per, nav):
         out.append({"cells": list(zip(cs.tolist(), rs.tolist())), "occ": ko, "unk": k - ko,
                     "cx": float(((cs + 0.5) / cols).mean()), "cy": float(((rs + 0.5) / rows).mean()),
                     "bbox": (float(cs.min() / cols), float(rs.min() / rows), float((cs.max() + 1) / cols), float((rs.max() + 1) / rows))})
+    return out + _marked_structures(per, cols, rows)
+
+
+def _marked_structures(per, cols, rows):
+    """Operator-marked structure areas (objects the depth camera cannot see: small, dark, shiny). Each area is one structure
+    whose footprint is the whole area, whatever the depth map says."""
+    out = []
+    for r in getattr(per, "mark_areas", []):
+        c0, c1 = max(0, int(math.floor(r[0] * cols))), min(cols - 1, int(math.ceil(r[2] * cols)) - 1)
+        r0, r1 = max(0, int(math.floor(r[1] * rows))), min(rows - 1, int(math.ceil(r[3] * rows)) - 1)
+        cells = [(c, k) for k in range(r0, r1 + 1) for c in range(c0, c1 + 1)]
+        if cells:
+            out.append({"cells": cells, "occ": len(cells), "unk": 0, "cx": (r[0] + r[2]) / 2, "cy": (r[1] + r[3]) / 2,
+                        "bbox": (r[0], r[1], r[2], r[3])})
     return out
 
 

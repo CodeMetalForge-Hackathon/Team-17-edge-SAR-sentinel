@@ -25,6 +25,8 @@ class Perception:
         self.depth_map = V.ObstacleMap()
         self.manual_markers = {}      # id -> 4x2 corners for a boundary marker the detector cannot read (static)
         self.manual = []              # manual footprints, normalized (x0,y0,x1,y1) -- always honoured
+        self.mark_areas = []          # operator "this is a structure" areas (normalized): a structure + a planner obstacle
+        self.ignore_areas = []        # operator "not a structure" areas (normalized): depth cells here never become structures
         self.warnings = []
         self.want_ground_refit = False
         self.last_markers = {}
@@ -69,11 +71,19 @@ class Perception:
             self.manual = [tuple(r) for r in json.load(open(self._p("manual.json")))]
         except Exception:
             pass
+        try:
+            a = json.load(open(self._p("areas.json")))
+            self.mark_areas = [tuple(r) for r in a.get("mark", [])]
+            self.ignore_areas = [tuple(r) for r in a.get("ignore", [])]
+        except Exception:
+            pass
 
     def save(self):
         json.dump(self.calib.to_dict(), open(self._p("calib.json"), "w"))
         json.dump(self.depth_map.to_dict(), open(self._p("depthmap.json"), "w"))
         json.dump([list(r) for r in self.manual], open(self._p("manual.json"), "w"))
+        json.dump({"mark": [list(r) for r in self.mark_areas], "ignore": [list(r) for r in self.ignore_areas]},
+                  open(self._p("areas.json"), "w"))
 
     # --- obstacles for planning: depth-derived cells + manual footprints
     def obstacle_rects(self, near=None, self_r=0.13):
@@ -82,7 +92,7 @@ class Perception:
         if near is not None:
             A = self.calib.aspect
             rects = [r for r in rects if math.hypot((((r[0] + r[2]) / 2) - near[0]) * A, ((r[1] + r[3]) / 2) - near[1]) > self_r]
-        return rects + list(self.manual)
+        return rects + list(self.manual) + list(self.mark_areas)      # a marked structure is always avoided
 
     def reset_heading(self):
         self._raw_hist = []

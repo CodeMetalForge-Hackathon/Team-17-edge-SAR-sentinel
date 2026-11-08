@@ -189,6 +189,7 @@ class App:
                         radius=n.clearance()[0], margin=n.clearance()[1], height_mm=hm),
             "depth_cells": self._cells(),
             "manual": [list(r) for r in per.manual],
+            "areas": {"mark": [list(r) for r in per.mark_areas], "ignore": [list(r) for r in per.ignore_areas]},
             "warnings": per.warnings,
             "log": n.log[-16:],
             "recording": None if not self.rec else {"n": self.rec["n"], "dir": self.rec["dir"]},
@@ -471,6 +472,17 @@ class App:
                 return 409, {"error": "stop first"}
             per.manual = [tuple(max(0.0, min(1.0, float(v))) for v in r) for r in d.get("rects", [])][:100]
             per.save()
+            return 200, {"ok": True}
+        if path == "/api/areas":
+            # operator area selection: "mark" = a structure the depth camera misses, "ignore" = not a structure (phantom)
+            if n.state == "running" or self.mission.running():
+                return 409, {"error": "stop the route / mission first"}
+            clean = lambda rs: [tuple(max(0.0, min(1.0, float(v))) for v in r) for r in rs if len(r) == 4][:50]
+            per.mark_areas, per.ignore_areas = clean(d.get("mark", [])), clean(d.get("ignore", []))
+            per.save()
+            self.mission._key = None                    # recompute the structure list on the next idle refresh
+            self.mission.refresh_preview()
+            n._log("areas: %d marked as structures, %d ignored" % (len(per.mark_areas), len(per.ignore_areas)))
             return 200, {"ok": True}
         if path == "/api/config":
             if n.state == "running":
