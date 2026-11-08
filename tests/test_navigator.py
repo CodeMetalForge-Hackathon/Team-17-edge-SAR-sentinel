@@ -340,6 +340,144 @@ def test_run_reuses_snapshot_map_and_route():
     assert per.map_frames - maps_before <= 1, (per.map_frames, maps_before)
 
 
+# ---------------------------------------------------------------------------------------- periodic in-run map refresh
+def _slow(world, dt=0.05):
+    """Make the sim take wall time per observation so wall-clock refresh periods are meaningful."""
+    orig = world.wait_fresh
+
+    def wf(min_seq, timeout=5.0):
+        time.sleep(dt)
+        return orig(min_seq, timeout)
+    world.wait_fresh = wf
+
+
+def _refresh_run(period=0.15, obstacle=None, at_step=3, **cfg):
+    w = S.SimWorld(obstacles_mm=[], rover=(150.0, 400.0, 0.0))
+    _slow(w)
+    per, nav, rover = make(w, map_period_s=period, **cfg)
+    nav.observe(1)
+    if obstacle:
+        def add():
+            while nav.step < at_step and nav.state != "done":
+                time.sleep(0.005)
+            w.obstacles.append(obstacle)
+        import threading
+        threading.Thread(target=add, daemon=True).start()
+    return w, per, nav, rover
+
+
+def test_map_refreshes_periodically_during_the_run():
+    w, per, nav, rover = _refresh_run(period=0.15)
+    run(nav, norm_of(1000.0, 400.0))
+    assert nav.state == "done", (nav.state, nav.reason, nav.log[-6:])
+    stamps = [t for t, _, _ in nav.map_log]
+    assert len(stamps) >= 3, nav.map_log
+    gaps = [b - a for a, b in zip(stamps, stamps[1:])]
+    assert max(gaps) < 0.15 * 3, gaps                          # a refresh at least every few periods (~period + latency)
+    seqs = [q for _, q, _ in nav.map_log]
+    assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs), seqs     # never an older frame over a newer one
+    assert per.map_frozen is False
+
+
+def test_stale_full_frame_never_overwrites_newer_map():
+    w = S.SimWorld(obstacles_mm=[], rover=(300.0, 250.0, 0.4))
+    per, nav, _ = make(w)
+    old, new = w.render(), w.render()
+    assert per.refresh_map(new) is True
+    ev = per.depth_map.ev.copy()
+    assert per.refresh_map(old) is False and (per.depth_map.ev == ev).all() and per.map_seq == new.seq
+
+
+def test_new_obstruction_stops_before_it_and_replans_around():
+    block = (700.0, 300.0, 780.0, 520.0, 120.0)
+    w, per, nav, rover = _refresh_run(period=0.1, obstacle=block, at_step=3)
+    run(nav, norm_of(1000.0, 400.0))
+    assert nav.state == "done", (nav.state, nav.reason, nav.log[-8:])
+    assert w.collisions == 0, nav.log[-8:]
+    assert nav.timing["obstruction_stops"] >= 1 and any(b for _, _, b in nav.map_log), (nav.timing, nav.map_log)
+    assert max(abs(l[2][1] - 400.0) for l in w.log) > 120.0, "route should have gone around the new obstacle"
+    assert any("ROUTE NOW BLOCKED" in m for m in nav.log)
+
+
+def test_no_route_after_refresh_holds_stopped_and_reports():
+    wall = (700.0, 0.0, 780.0, float(S.H_MM), 120.0)
+    w, per, nav, rover = _refresh_run(period=0.1, obstacle=wall, at_step=3, no_route_hold_s=0.6)
+    run(nav, norm_of(1000.0, 400.0))
+    assert nav.state == "failed" and "replan" in nav.reason, (nav.state, nav.reason, nav.log[-8:])
+    assert w.collisions == 0 and w.driving is None and rover.sent[-1][0] == "S" and nav.armed is False
+    assert any("NO ROUTE" in m for m in nav.log)
+
+
+def test_map_refresh_failure_stops_the_run():
+    w, per, nav, rover = _refresh_run(period=0.1, map_max_age_s=0.5)
+    w.latest_full = lambda: None                               # no full frame can be obtained any more
+    run(nav, norm_of(1000.0, 400.0))
+    assert nav.state == "failed" and "obstacle map" in nav.reason, (nav.state, nav.reason, nav.log[-6:])
+    assert w.driving is None and rover.sent[-1][0] == "S" and nav.armed is False
+
+
+def test_tracking_and_stop_stay_responsive_during_a_slow_refresh():
+    w, per, nav, rover = _refresh_run(period=0.1)
+    orig = per.refresh_map
+    per.refresh_map = lambda fr, repeats=3: (time.sleep(2.0), orig(fr, repeats))[1]     # mapping takes 2 s
+    ok, msg = nav.start(norm_of(1000.0, 400.0))
+    assert ok, msg
+    t_end = time.time() + 5
+    while time.time() < t_end and not (per._mapper is not None and per._mapper.is_alive()):
+        time.sleep(0.01)
+    assert per._mapper is not None and per._mapper.is_alive(), "mapper never started"
+    step0, frames0 = nav.step, nav.timing["frames"]
+    time.sleep(0.4)
+    if nav.state == "running":
+        assert nav.step > step0 or nav.timing["frames"] > frames0, "control loop blocked while mapping"
+        t = time.time()
+        nav.stop()
+        assert time.time() - t < 0.5 and rover.sent[-1][0] == "S" and w.driving is None
+    nav.join(10)
+    assert nav.state != "running"
+
+
+def test_saved_pattern_heading_is_reused_without_probes_and_clearance_is_explained():
+    w = S.SimWorld(obstacles_mm=WALL, rover=(300.0, 250.0, 0.4))
+    per, nav, _ = make(w)
+    obs = per.process(w.render())
+    obs.pose["theta"], obs.pose["theta_dec"], obs.pose["source"] = None, None, "depth-blob"
+    obs.pose["theta_raw"] = 0.3
+    nav.saved_heading = {"hbias": 0.1, "turn_dir": {"Q": 1.0, "E": -1.0}, "t": time.time() - 3 * 3600}   # hours old
+    nav.hbias, nav.turn_dir = None, None
+
+    def boom():
+        raise AssertionError("heading calibration probes must not run when valid settings are saved")
+    nav.calibrate_pattern_heading = boom
+    o2, why = nav._calibrate_if_needed(obs)
+    assert why == "" and nav.hbias == 0.1 and nav.turn_dir["Q"] == 1.0
+    txt = nav._clearance_detail(obs.pose, [(0.40, 0.40, 0.42, 0.45)])
+    assert "mm from the centre" in txt and "nearest edge" in txt and "footprint" in txt, txt
+
+
+def test_heading_average_does_not_lag_while_the_rover_turns():
+    """The 3-frame heading average smooths stationary noise but must follow a turn immediately (no lag that would let a
+    still-rotating rover look settled)."""
+    import numpy as np
+    import vision as V
+    w = S.SimWorld(obstacles_mm=[], rover=(400.0, 400.0, 0.0), marker=False, diff=True)
+    per, nav, _ = make(w)
+    seen = []
+    orig = V.pattern_heading
+    seq = iter([0.0, 0.02, 0.0, 0.5, 1.0, 1.0, 1.01])
+    V.pattern_heading = lambda *a, **k: next(seq)
+    try:
+        for _ in range(7):
+            o = per.process(w.render())
+            if o.pose is not None and o.pose.get("theta_raw") is not None:
+                seen.append(o.pose["theta_raw"])
+    finally:
+        V.pattern_heading = orig
+    assert len(seen) >= 6, seen
+    assert abs(seen[3] - 0.5) < 0.02 and abs(seen[4] - 1.0) < 0.02, seen       # follows the turn at once
+    assert abs(seen[-1] - 1.0) < 0.03
+
+
 def test_stop_disarms_and_requires_arm():
     w = S.SimWorld(obstacles_mm=[], rover=(250.0, 400.0, 0.0))
     per, nav, rover = make(w)

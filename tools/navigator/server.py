@@ -176,6 +176,7 @@ class App:
         st = getattr(self.src, "stats", None)
         out = {"timing": {k: (round(v, 1) if isinstance(v, float) else v) for k, v in self.nav.timing.items()},
                "perception_ms": round(self.per.stats["ms"] / self.per.stats["frames"], 1) if self.per.stats["frames"] else None}
+        out["map_refreshes"] = [[time.strftime("%H:%M:%S", time.localtime(t)), q, bool(b)] for t, q, b in self.nav.map_log]
         if st:
             out["frames"] = {"full": st["full"], "roi": st["roi"], "kbytes": round(st["bytes"] / 1024),
                              "full_ms": round(st["full_ms"] / st["full"]) if st["full"] else None,

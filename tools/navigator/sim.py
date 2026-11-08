@@ -142,6 +142,11 @@ class SimWorld:
     def latest(self):
         return self.render()
 
+    def latest_full(self):
+        f = self.render()
+        f.rx = time.time()
+        return f
+
     # ----- rover dynamics (what the controller must discover)
     def apply(self, cmd, dur, speed=0.35, trim=0.0):
         if not self.responsive:

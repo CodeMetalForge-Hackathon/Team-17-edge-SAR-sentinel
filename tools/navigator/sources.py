@@ -81,6 +81,7 @@ class RemoteFrames:
         self.hint = None                  # callable -> (px, py, t) of the last tracked rover, or None
         self.hold_full = False            # True during a run: no periodic full frames
         self.want_full = False
+        self.full_period = self.FULL_PERIOD_S     # s between full frames; the navigator sets ~8 s while a run is active
         self.last_full_t = 0.0
         self.stats = {"full": 0, "roi": 0, "bytes": 0, "full_ms": 0.0, "roi_ms": 0.0}
         self.running = True
@@ -125,7 +126,7 @@ class RemoteFrames:
         roi = self._roi()
         if self.full is None or roi is None or self.want_full:
             return "full", None
-        if not self.hold_full and now - self.last_full_t > self.FULL_PERIOD_S:
+        if now - self.last_full_t > self.full_period:
             return "full", None
         return "roi", roi
 

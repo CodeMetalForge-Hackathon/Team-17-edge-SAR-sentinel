@@ -219,7 +219,7 @@ def measure_aspect(corners, K, plane):
 class ObstacleMap:
     """Persistent obstacle evidence on a fine grid over the normalized sandbox, from depth height above the plane."""
 
-    def __init__(self, cols=72, rows=48, h_min=50.0, h_max=900.0):
+    def __init__(self, cols=72, rows=48, h_min=35.0, h_max=900.0):
         self.cols, self.rows, self.h_min, self.h_max = cols, rows, h_min, h_max
         self.ev = np.zeros((rows, cols), np.float32)   # 0 free .. 1 obstacle
         self.seen = np.zeros((rows, cols), bool)

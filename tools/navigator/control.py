@@ -66,7 +66,10 @@ class Navigator:
                     "rover_w_mm": None, "rover_l_mm": None, "margin_mm": None,
                     # arrival: centre within this many mm of the selected point (~1/3 of the rover half-width, ~6x the
                     # measured tracking noise, ~1.5x the shortest reliable step)
-                    "arrive_tol_mm": 50.0, "cruise": True}
+                    "arrive_tol_mm": 50.0, "cruise": True,
+                    # periodic obstacle detection DURING a run: a fresh full frame is folded into the map about every
+                    # map_period_s; a map older than map_max_age_s stops the run; no route is held (stopped) up to hold_s
+                    "map_period_s": 10.0, "map_max_age_s": 25.0, "no_route_hold_s": 30.0}
         self.cfg.update(cfg or {})
         self.model = MotionModel()
         self.now = now
@@ -89,7 +92,11 @@ class Navigator:
         self._leg_dir = {}
         self.latency_s = 1.0          # camera-to-decision latency estimate (updated from measured fetch times)
         self.timing = {"frames": 0, "fetch_ms": 0.0, "cruise_s": 0.0, "bursts": 0, "turns": 0, "plans": 0, "plans_reused": 0,
-                       "recoveries": 0, "snapshot_ms": 0.0}
+                       "recoveries": 0, "snapshot_ms": 0.0, "map_refreshes": 0, "obstruction_stops": 0}
+        self.map_log = []             # (wall time, frame seq, route_blocked) of every in-run map refresh
+        self._map_seen = None
+        self._hold_t0 = None
+        self._had_route = False
         self._cached = None           # {"target", "wps"}: the route planned from the target snapshot, reused while on it
         self.cruise_ttl = CRUISE_TTL
         self.target = None            # normalized (x, y), exactly as selected (never snapped)
@@ -195,6 +202,69 @@ class Navigator:
         res = self.make_plan(pos)
         self.timing["plans"] += 1
         self._cached = None if res["error"] else {"target": self.target, "wps": [tuple(w) for w in res["waypoints"]]}
+        return res
+
+    def _route_blocked(self, wps):
+        """Is any part of the remaining route (from the rover's position) now blocked for the rover footprint (rotated along
+        each segment, +-8 deg allowance, plus the clearance margin) on the CURRENT map?"""
+        c, A = self.cfg, self.p.calib.aspect
+        L, W, m = self.footprint()
+        L, W = L + 0.14 * W, W + 0.14 * L
+        pos = wps[0]
+        obs = self.p.obstacle_rects(near=pos)
+        for a, b in zip(wps, wps[1:]):
+            du, dv = (b[0] - a[0]) * A, b[1] - a[1]
+            ln = math.hypot(du, dv)
+            if ln < 1e-6:
+                continue
+            th = math.atan2(dv, du)
+            ex = (L * abs(math.cos(th)) + W * abs(math.sin(th))) / 2 + m
+            ey = (L * abs(math.sin(th)) + W * abs(math.cos(th))) / 2 + m
+            blk = geom.rect_blocked(obs, c["cols"], c["rows"], ex, ey, A)
+            k = max(2, int(ln / 0.01))
+            for i in range(k + 1):
+                f = i / k
+                u, v = a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f
+                if math.hypot((u - pos[0]) * A, v - pos[1]) < 0.06:
+                    continue                                   # the rover's own cell
+                if geom.cell_of(u, v, c["cols"], c["rows"]) in blk:
+                    return True
+        return False
+
+    def _map_tick(self, pose):
+        """Cheap per-pose check of the periodic obstacle refresh. Starts an off-thread refresh when a newer full frame is
+        available, reacts to a refreshed map (route blocked -> STOP and replan), and stops the run if the map is too old.
+        Returns '' to carry on, 'blocked' if the rover was stopped for a new obstruction, else a failure reason."""
+        per, c = self.p, self.cfg
+        now = self.now()
+        if not self.p.map_frozen:
+            return ""
+        if now - per.map_time >= 0.5 * c["map_period_s"]:
+            full = getattr(self.src, "latest_full", None)
+            fr = full() if full else self.src.latest()
+            if fr is not None and fr.seq > per.map_seq:
+                per.refresh_async(fr)
+        res = ""
+        if per.map_seq != self._map_seen:                        # a newer map was swapped in by the mapper thread
+            first = self._map_seen is None
+            self._map_seen = per.map_seq
+            if not first:
+                wps = [(pose["x"], pose["y"])] + [tuple(w) for w in self.path[1:]] if self.path else None
+                blocked = bool(wps and len(wps) >= 2 and self._route_blocked(wps))
+                self.map_log.append((time.time(), per.map_seq, blocked))
+                self.timing["map_refreshes"] += 1
+                self._log("map refreshed from full frame seq %s%s" % (per.map_seq, ": ROUTE NOW BLOCKED" if blocked else ""))
+                if blocked:
+                    self._halt()                                   # stop before entering it, replan from a fresh pose
+                    self._cached, self.path = None, []              # the old route is void: replan, do not re-test it
+                    self.timing["obstruction_stops"] += 1
+                    res = "blocked"
+        age = now - per.map_time
+        if age > c["map_period_s"] and hasattr(self.src, "request_full"):
+            self.src.request_full()
+        if age > c["map_max_age_s"]:
+            self._halt()
+            return "obstacle map is %.0f s old (refresh failed: %s): stopped" % (age, per.map_err or "no fresh full frame")
         return res
 
     def preview(self):
@@ -589,7 +659,7 @@ class Navigator:
         if obs.pose.get("theta_raw") is not None:
             sh = self.saved_heading or ({"hbias": self.hbias, "turn_dir": self.turn_dir, "t": self._calib_t}
                                         if self.hbias is not None and self.turn_dir else None)
-            if sh and time.time() - sh["t"] < 900:
+            if sh and time.time() - sh["t"] < 12 * 3600:
                 self.hbias, self.turn_dir, self.imu = sh["hbias"], sh["turn_dir"], None
                 self._log("reusing heading calibration (offset %.0f deg); re-anchored by forward motion" % math.degrees(self.hbias))
             else:
@@ -618,9 +688,13 @@ class Navigator:
         snap = self._snapshot()
         if snap == "":
             return self._fail("no fresh full frame for the target snapshot")
-        self.p.map_frozen = True                # the map from this snapshot is reused for the whole run
+        self.p.map_frozen = True                # in-run maps come only from refresh_map (full frames, off-thread)
+        self._map_seen, self._hold_t0, self._had_route = self.p.map_seq, None, False
+        self.map_log = []
         if hasattr(self.src, "hold_full"):
-            self.src.hold_full = True
+            self.src.hold_full = True               # no idle throttling of tracking frames
+        if hasattr(self.src, "full_period"):
+            self.src.full_period = 0.8 * self.cfg["map_period_s"]     # a full frame at least every ~8 s (<= 10 s incl. transfer)
         obs = snap if (snap is not None and snap.pose is not None) else self.observe(self._seq_after_stop() + 1)
         if obs is not None and obs.pose is not None:       # never move (not even a calibration probe) from outside
             if not obs.pose["inside"]:
@@ -662,10 +736,31 @@ class Navigator:
                     return self._fail("step limit reached")
                 if self.now() - t0 > c["max_seconds"]:
                     return self._fail("time limit reached")
+                why = self._map_tick(pose)
+                if why == "blocked":                       # rover halted: fresh pose, then replan on the new map
+                    obs = self.observe(self._seq_after_stop() + 1, quick=True)
+                    continue
+                if why:
+                    return self._fail(why)
                 res = self._route(pos)
-                self.path = res["waypoints"]
                 if res["error"]:
+                    if self._had_route and self.p.map_frozen:       # new obstruction left no route: stay stopped, report, wait
+                        if self._hold_t0 is None:
+                            self._hold_t0 = self.now()
+                            self._log("NO ROUTE after the map refresh: rover stopped, holding (%s)" % res["error"])
+                            self.reason = "no route: holding stopped"
+                        self._halt()
+                        if self.now() - self._hold_t0 > c["no_route_hold_s"]:
+                            return self._fail("replan: %s (held stopped %.0f s)" % (res["error"], c["no_route_hold_s"]))
+                        time.sleep(0.3)
+                        obs = self.observe(self._seq_after_stop() + 1, quick=True)
+                        continue
                     return self._fail("replan: " + res["error"])
+                if self._hold_t0 is not None:
+                    self._log("route found again: resuming")
+                    self._hold_t0, self.reason = None, ""
+                self._had_route = True
+                self.path = res["waypoints"]
                 rem = geom.path_length_sq(res["waypoints"], self.p.calib.aspect)
                 self.remaining = rem
                 if last_cmd in ("F", "B", "CRUISE"):
@@ -717,6 +812,8 @@ class Navigator:
             self.p.map_frozen = False
             if hasattr(self.src, "hold_full"):
                 self.src.hold_full = False
+            if hasattr(self.src, "full_period"):
+                self.src.full_period = getattr(self.src, "FULL_PERIOD_S", 60.0)
             if self.state == "running":
                 self.state, self.reason = "idle", "stopped"
             self.save_model()
@@ -877,6 +974,26 @@ class Navigator:
         return {"kind": "burst", "cmd": cmd, "dur": round(dur, 2), "speed": s, "trim": trim,
                 "text": "%s %.2fs @%.2f (%.2f to segment end)" % (cmd, dur, s, seg_rem)}
 
+    def _clearance_detail(self, pose, obs):
+        """Specific geometry for a clearance rejection: the nearest obstacle cell and the four table edges, in mm, against
+        the distance the footprint needs (enclosing radius of the measured/configured footprint)."""
+        A, hm = self.p.calib.aspect, self.p.calib.height_mm or 0
+        L, W, m = self.footprint()
+        r = math.hypot(L, W) / 2
+        u, v = pose["x"] * A, pose["y"]
+        edges = {"left": u, "right": A - u, "bottom": v, "top": 1 - v}
+        best = None
+        for o in obs:
+            d = math.hypot(max(0.0, o[0] * A - u, u - o[2] * A), max(0.0, o[1] - v, v - o[3]))
+            if best is None or d < best[0]:
+                best = (d, o)
+        e = min(edges, key=edges.get)
+        txt = "rover at (%.3f, %.3f), footprint %.0fx%.0f mm (turning radius %.0f mm); " % (pose["x"], pose["y"], L * hm, W * hm, r * hm)
+        if best:
+            o = best[1]
+            txt += "nearest obstacle cell x %.3f-%.3f y %.3f-%.3f is %.0f mm from the centre; " % (o[0], o[2], o[1], o[3], best[0] * hm)
+        return txt + "nearest edge %s %.0f mm" % (e, edges[e] * hm)
+
     def _unsafe(self, pose, act):
         """Hard safety (footprint with NO margin): a translation must keep the rotated footprint clear of obstacles and
         the table edge over the distance covered before the next observation; a turn must not sweep the enclosing circle
@@ -902,11 +1019,11 @@ class Navigator:
                 pv = pos[1] + sgn * math.sin(th) * dist * f
                 cell = geom.cell_of(pu / A, pv, c["cols"], c["rows"])
                 if cell in blk and cell != here:
-                    return "next move would bring the rover footprint into an obstacle or the table edge"
+                    return "next move would bring the rover footprint into an obstacle or the table edge: " + self._clearance_detail(pose, obs)
         elif act["cmd"] in ("Q", "E"):
             bt = geom.planning_blocked(obs, c["cols"], c["rows"], math.hypot(L, W) / 2, A)
             if here in bt:
-                return "a turn here would sweep the rover footprint into an obstacle or the table edge"
+                return "a turn here would sweep the rover footprint into an obstacle or the table edge: " + self._clearance_detail(pose, obs)
         return ""
 
     # ------------------------------------------------------------------ learning

@@ -30,6 +30,11 @@ class Perception:
         self.last_markers = {}
         self.last_obs = None
         self.map_frames = 0
+        self.map_seq = -1            # sequence of the full frame the current obstacle map was built from
+        self.map_time = 0.0          # when that frame was received
+        self._mapper = None
+        self.map_err = ""
+        self._pattern_seen = False   # the rover's marker pattern has been read at least once (identity check enabled)
         self.map_frozen = False      # True during a run: the obstacle map built from the target snapshot is reused
         self.track = None            # (px, py, t): last tracked rover pixel, used by the frame source for its window
         self.stats = {"frames": 0, "partial": 0, "ms": 0.0}
@@ -99,7 +104,55 @@ class Perception:
             if obs.pose is not None and self.calib.plane is not None and not getattr(frame, "partial", False):
                 for _ in range(repeats - 1):
                     self.depth_map.update(frame.depth, self.calib, rover=[obs.pose], rover_exclude=self._rover_exclude())
+            if not getattr(frame, "partial", False):
+                self.map_seq = frame.seq
+                self.map_time = getattr(frame, "rx", None) or time.time()
             return obs
+
+    def refresh_map(self, frame, repeats=3):
+        """Recompute obstacle occupancy from the NUMERICAL depth of one full frame, off the control thread. Works on a copy
+        of the map and swaps it in atomically, only if no newer frame has been applied (an older frame never overwrites a
+        newer map). Manual boxes (self.manual) and the validated calibration are untouched. Returns True if applied."""
+        c = self.calib
+        if getattr(frame, "partial", False) or c.plane is None or c.H is None or frame.depth is None:
+            return False
+        with self.lock:
+            if frame.seq <= self.map_seq:
+                return False
+            base = self.depth_map
+            new = V.ObstacleMap(base.cols, base.rows, base.h_min, base.h_max)
+            new.ev, new.seen, new.height = base.ev.copy(), base.seen.copy(), base.height.copy()
+            near = (self.last_pose["x"], self.last_pose["y"]) if self.last_pose else None
+            recent = [q for _, q in self._recent]
+            lastp = self.last_pose
+        pose = V.blob_pose(frame.depth, c, near=near, known=base)       # the rover as it was in THIS frame
+        if pose is not None and self._pattern_seen and V.pattern_heading(frame.bgr, frame.gray, c, frame.depth, pose["px"]) is None:
+            pose = None                                                  # not confidently the rover: exclude nothing for it
+        rovers = ([pose] if pose else []) + recent + ([lastp] if lastp else [])
+        for _ in range(repeats):
+            new.update(frame.depth, c, rover=rovers or None, rover_exclude=self._rover_exclude())
+        with self.lock:
+            if frame.seq <= self.map_seq:
+                return False
+            self.depth_map, self.map_seq = new, frame.seq
+            self.map_time = getattr(frame, "rx", None) or time.time()
+            self.map_frames += 1
+        return True
+
+    def refresh_async(self, frame):
+        """Start refresh_map in a worker thread unless one is already running (single mapper, no queue build-up)."""
+        if self._mapper is not None and self._mapper.is_alive():
+            return False
+
+        def work():
+            try:
+                self.refresh_map(frame)
+                self.map_err = ""
+            except Exception as e:
+                self.map_err = "map refresh failed: %s" % e
+        self._mapper = threading.Thread(target=work, daemon=True)
+        self._mapper.start()
+        return True
 
     def _process(self, frame, update_map):
         t_start = time.time()
@@ -140,24 +193,41 @@ class Perception:
         elif c.H is not None and c.plane is not None and self.allow_blob:
             near = (self.last_pose["x"], self.last_pose["y"]) if self.last_pose else None
             pose = V.blob_pose(frame.depth, c, near=near, known=self.depth_map)
+            raw = V.pattern_heading(frame.bgr, frame.gray, c, frame.depth, pose["px"]) if pose is not None else None
+            if raw is None and self._pattern_seen and (near is not None or self.depth_map.blocked_cells()):
+                # identity check: the rover is the blob that carries the marker pattern. A latched or map-filtered blob
+                # (cans, other objects) has none, so look for the rover globally, without the map filter
+                alt = V.blob_pose(frame.depth, c, near=None, known=None)
+                araw = V.pattern_heading(frame.bgr, frame.gray, c, frame.depth, alt["px"]) if alt is not None else None
+                if araw is not None:
+                    pose, raw = alt, araw
             if pose is not None:
-                raw = V.pattern_heading(frame.bgr, frame.gray, c, frame.depth, pose["px"])
+                pose["verified"] = raw is not None
                 if raw is not None:
+                    self._pattern_seen = True
                     now = time.time()
-                    self._raw_hist = [(t, r) for t, r in self._raw_hist if now - t < 2.5][-2:] + [(now, raw)]
+                    hist = [(t, r) for t, r in self._raw_hist if now - t < 2.5][-2:]
+                    if hist:
+                        m = math.atan2(sum(math.sin(r) for _, r in hist), sum(math.cos(r) for _, r in hist))
+                        if abs((raw - m + math.pi) % (2 * math.pi) - math.pi) > math.radians(8):
+                            hist = []            # the rover is turning (or the reading jumped): no lagging average
+                    self._raw_hist = hist + [(now, raw)]
                     raw = math.atan2(sum(math.sin(r) for _, r in self._raw_hist), sum(math.cos(r) for _, r in self._raw_hist))
                 pose["theta_raw"] = raw
-        if pose is not None:
+        # only a confidently identified rover is tracked / excluded from occupancy: a marker, a blob carrying the marker
+        # pattern, or (when no pattern has ever been readable, e.g. IMU-heading rovers) the blob itself
+        conf = pose is not None and (pose.get("source") == "marker" or pose.get("verified", True) or not self._pattern_seen)
+        if conf:
             self.last_pose = pose
             if pose.get("source") == "depth-blob":
                 self.aabb_hist = (self.aabb_hist + [tuple(pose["dims_mm"])])[-9:]
         do_map = update_map and not partial and not self.map_frozen
-        if pose is not None and pose.get("px") is not None:
+        if conf and pose.get("px") is not None:
             self.track = (float(pose["px"][0]), float(pose["px"][1]), time.time())
         if do_map and c.plane is not None and c.H is not None and frame.depth is not None:
             now = time.time()
             self._recent = [(t, q) for t, q in self._recent if now - t < 4.0][-4:]
-            if pose is not None:
+            if conf:
                 self._recent.append((now, pose))
             used = self.depth_map.update(frame.depth, c, rover=[q for _, q in self._recent] or None, rover_exclude=self._rover_exclude())
             self.map_frames += 1
@@ -234,7 +304,7 @@ class Perception:
         """Radius (height units) around the rover marker whose raised pixels are the rover itself, not obstacles."""
         dims, hm = self.rover_dims_mm(), self.calib.height_mm
         if dims and hm:
-            return math.hypot(*dims) / 2 / hm + 0.03
+            return math.hypot(*dims) / 2 / hm + 0.015
         return 0.22
 
     def rover_aabb_mm(self):
