@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Rover Navigator</title>
+<style>
+:root{--bg:#10151c;--pn:#18202a;--tx:#e6edf3;--mu:#8b98a6;--ok:#2ea043;--bad:#f85149;--wn:#d29922;--ac:#58a6ff}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--tx);font:14px system-ui,sans-serif}
+.wrap{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:12px;padding:12px;max-width:1300px;margin:auto}
+@media(max-width:900px){.wrap{grid-template-columns:1fr}}
+.pn{background:var(--pn);border-radius:10px;padding:10px}
+canvas{width:100%;display:block;border-radius:6px;background:#000;touch-action:none;cursor:crosshair}
+h3{margin:0 0 6px;font-size:13px;color:var(--mu);font-weight:600;text-transform:uppercase;letter-spacing:.04em}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:6px 0}
+button{background:#263241;color:var(--tx);border:0;border-radius:6px;padding:8px 12px;font:inherit;cursor:pointer}
+button:disabled{opacity:.4;cursor:default}
+#start{background:var(--ok);font-weight:700;padding:12px 18px;font-size:16px}
+#stop{background:var(--bad);font-weight:800;font-size:22px;padding:18px;width:100%;letter-spacing:.06em}
+.chip{padding:2px 8px;border-radius:10px;background:#263241;font-size:12px}
+.ok{background:#1b4d2a}.bad{background:#5a1d1a}.wn{background:#4d3a10}
+#badge{font-weight:800;font-size:20px}
+#bar{height:10px;background:#263241;border-radius:5px;overflow:hidden}#bar i{display:block;height:100%;background:var(--ac);width:0}
+pre{margin:0;font:12px ui-monospace,monospace;color:var(--mu);white-space:pre-wrap;max-height:210px;overflow:auto}
+label{color:var(--mu)}input[type=number]{width:64px;background:#0d1117;color:var(--tx);border:1px solid #30363d;border-radius:4px;padding:4px}
+select{background:#0d1117;color:var(--tx);border:1px solid #30363d;border-radius:4px;padding:6px}
+img{width:100%;border-radius:6px}
+</style></head><body>
+<div class="wrap">
+<div>
+ <div class="pn">
+  <div class="row">
+   <label>Click mode</label>
+   <select id="mode"><option value="target">Set target</option><option value="box">Draw obstacle box</option><option value="del">Delete obstacle box</option></select>
+   <span class="chip" id="hint">click the map to set the destination</span>
+  </div>
+  <canvas id="cv" width="720" height="480"></canvas>
+  <div class="row" style="margin-top:8px"><span class="chip" style="background:#5a1d1a">red = depth obstacles</span><span class="chip" style="background:#4d3a10">orange = manual boxes</span><span class="chip" style="background:#1f4d52">cyan = route</span><span class="chip">dashed ring = clearance (rover radius + margin)</span></div>
+ </div>
+ <div class="pn" style="margin-top:12px"><h3>Camera (RGB left, colourised depth right â€” display only)</h3><img id="cam" alt="camera"></div>
+</div>
+<div>
+ <div class="pn">
+  <div class="row"><span id="badge">IDLE</span><span class="chip" id="dry"></span></div>
+  <div id="reason" style="color:var(--mu);min-height:18px"></div>
+  <div id="bar"><i></i></div>
+  <div class="row" style="justify-content:space-between"><span id="prog">no target</span><span id="stepn"></span></div>
+  <div class="row"><label><input type="checkbox" id="arm"> Arm motion</label></div>
+  <div class="row"><button id="start">START</button></div>
+  <button id="stop">STOP (space)</button>
+ </div>
+ <div class="pn" style="margin-top:12px"><h3>Perception</h3>
+  <div class="row" id="chips"></div>
+  <div class="row"><label>Rover W×L mm <input type="number" id="rw" step="5" min="0" max="600"> × <input type="number" id="rl" step="5" min="0" max="600"></label><label>margin mm <input type="number" id="mm" step="5" min="0" max="200"></label></div><div class="row"><span class="chip" id="clr"></span></div>
+  <div class="row"><button id="recal">Recalibrate ground</button><button id="clrmap">Clear depth map</button></div>
+  <div class="row"><button id="rec">Record depth+RGB</button><span class="chip" id="recn"></span></div>
+  <div style="color:var(--mu);font-size:12px">Sizes are fractions of sandbox height (dimensionless). Calibration, map and motion model persist across STOP and restarts.</div>
+ </div>
+ <div class="pn" style="margin-top:12px"><h3>Log</h3><pre id="log"></pre></div>
+</div></div>
+<script>
+const $=id=>document.getElementById(id);const cv=$("cv"),ctx=cv.getContext("2d");
+let S=null,img=new Image(),imgSeq=-1,drag=null,camSeq=-1;
+const post=(p,b)=>fetch(p,{method:"POST",headers:{"X-Requested-With":"nav","Content-Type":"application/json"},body:JSON.stringify(b||{})}).then(r=>r.json()).catch(e=>({error:String(e)}));
+function W(){return cv.width}function Hh(){return cv.height}
+const X=x=>x*cv.width, Y=y=>(1-y)*cv.height;
+function toNorm(e){const r=cv.getBoundingClientRect();return [(e.clientX-r.left)/r.width,1-(e.clientY-r.top)/r.height]}
+function draw(){
+  if(!S)return;const asp=S.calib.aspect||1.5;const h=Math.round(720/asp);if(cv.height!==h){cv.height=h}
+  ctx.clearRect(0,0,W(),Hh());
+  if(img.complete&&img.naturalWidth)ctx.drawImage(img,0,0,W(),Hh());else{ctx.fillStyle="#222";ctx.fillRect(0,0,W(),Hh());ctx.fillStyle="#888";ctx.fillText("waiting for frame + boundary markers",20,30)}
+  const dc=S.depth_cells;ctx.fillStyle="rgba(248,81,73,.45)";
+  (dc.cells||[]).forEach(([c,r,v])=>{if(v>=0.5)ctx.fillRect(X(c/dc.cols),Y((r+1)/dc.rows),W()/dc.cols+1,Hh()/dc.rows+1)});
+  ctx.fillStyle="rgba(210,153,34,.5)";ctx.strokeStyle="#d29922";ctx.lineWidth=2;
+  S.manual.forEach(r=>{ctx.fillRect(X(r[0]),Y(r[3]),X(r[2])-X(r[0]),Y(r[1])-Y(r[3]));ctx.strokeRect(X(r[0]),Y(r[3]),X(r[2])-X(r[0]),Y(r[1])-Y(r[3]))});
+  if(drag&&drag.b){ctx.strokeStyle="#fff";ctx.setLineDash([5,4]);const a=drag.a,b=drag.b;ctx.strokeRect(X(Math.min(a[0],b[0])),Y(Math.max(a[1],b[1])),Math.abs(X(a[0])-X(b[0])),Math.abs(Y(a[1])-Y(b[1])));ctx.setLineDash([])}
+  const P=S.path;if(P&&P.length>1){ctx.strokeStyle="#39c5cf";ctx.lineWidth=3;ctx.beginPath();P.forEach((p,i)=>i?ctx.lineTo(X(p[0]),Y(p[1])):ctx.moveTo(X(p[0]),Y(p[1])));ctx.stroke();ctx.fillStyle="#39c5cf";P.forEach(p=>{ctx.beginPath();ctx.arc(X(p[0]),Y(p[1]),4,0,7);ctx.fill()})}
+  if(S.target){const t=S.target;ctx.strokeStyle="#2ea043";ctx.lineWidth=3;ctx.beginPath();ctx.arc(X(t[0]),Y(t[1]),12,0,7);ctx.moveTo(X(t[0])-18,Y(t[1]));ctx.lineTo(X(t[0])+18,Y(t[1]));ctx.moveTo(X(t[0]),Y(t[1])-18);ctx.lineTo(X(t[0]),Y(t[1])+18);ctx.stroke()}
+  const p=S.pose;if(p){const rr=(S.cfg.radius+S.cfg.margin)*Hh();ctx.strokeStyle="rgba(255,255,255,.6)";ctx.setLineDash([6,5]);ctx.lineWidth=1.5;ctx.beginPath();ctx.arc(X(p.x),Y(p.y),rr,0,7);ctx.stroke();ctx.setLineDash([]);
+   const asp2=asp,th=p.theta,L=S.cfg.radius*Hh()*1.3,cx=X(p.x),cy=Y(p.y),dx=Math.cos(th)*L,dy=-Math.sin(th)*L;
+   ctx.strokeStyle="#58a6ff";ctx.fillStyle="#58a6ff";ctx.lineWidth=4;ctx.beginPath();ctx.moveTo(cx,cy);ctx.lineTo(cx+dx,cy+dy);ctx.stroke();ctx.beginPath();ctx.arc(cx,cy,6,0,7);ctx.fill()}
+}
+function chip(t,c){return `<span class="chip ${c}">${t}</span>`}
+function ui(){
+  const s=S,n=s.nav,c=s.calib;
+  $("badge").textContent=n.state.toUpperCase();$("badge").style.color={running:"#58a6ff",done:"#2ea043",failed:"#f85149",idle:"#e6edf3"}[n.state];
+  $("reason").textContent=n.reason||s.plan_error||"";
+  $("dry").textContent=s.dry_run?"DRY-RUN: no rover packets":(s.motion_enabled?"LIVE rover link":"motion disabled");$("dry").className="chip "+(s.dry_run?"wn":(s.motion_enabled?"bad":""));
+  $("arm").checked=n.armed;$("arm").disabled=!s.motion_enabled;
+  $("start").disabled=!(n.armed&&s.target&&n.state!=="running"&&s.pose);$("start").textContent=n.state==="running"?"RUNNINGâ€¦":"START";
+  const d0=n.dist;$("prog").textContent=s.target?(d0==null?"target set":("distance to target "+d0.toFixed(3)+" (sandbox heights)")):"no target â€” click the map";
+  $("stepn").textContent=n.step?("burst "+n.step):"";
+  if(s.target&&n.dist!=null){if(!ui.d0||n.state!=="running")ui.d0=Math.max(n.dist,0.001);$("bar").firstElementChild.style.width=Math.max(0,Math.min(100,100*(1-n.dist/ui.d0)))+"%"}
+  $("chips").innerHTML=chip("boundary "+(c.boundary_live?"live":(c.boundary_stored?"stored":"MISSING")),c.boundary_live?"ok":(c.boundary_stored?"wn":"bad"))
+   +chip("ground plane "+(c.plane?"ok":"not fit"),c.plane?"ok":"bad")+chip("aspect "+c.aspect+(c.aspect_measured?" (depth)":" (assumed)"),c.aspect_measured?"ok":"wn")
+   +chip("rover marker "+(s.pose?"seen":"LOST"),s.pose?"ok":"bad")+chip("frame "+(s.frame.age_s==null?"none":s.frame.age_s+"s old"),(s.frame.age_s!=null&&s.frame.age_s<3)?"ok":"bad")
+   +(s.warnings||[]).map(w=>chip(w,"wn")).join("")+(s.frame.err?chip("camera: "+s.frame.err,"bad"):"");
+  [["rw",s.cfg.rover_w_mm],["rl",s.cfg.rover_l_mm],["mm",s.cfg.margin_mm]].forEach(([i,v])=>{if(document.activeElement!==$(i))$(i).value=v==null?"":v});
+  $("clr").textContent="clearance radius "+s.cfg.radius.toFixed(3)+" + margin "+s.cfg.margin.toFixed(3)+" sandbox heights"+(s.cfg.height_mm?(" (sandbox height "+Math.round(s.cfg.height_mm)+" mm)"):"");
+  $("log").textContent=s.log.join("\n");$("recn").textContent=s.recording?("recording "+s.recording.n+" frames"):"";$("rec").textContent=s.recording?"Stop recording":"Record depth+RGB";
+}
+async function poll(){
+  try{S=await (await fetch("/api/state")).json();
+   if(S.frame.seq!==imgSeq&&S.calib.boundary_stored){imgSeq=S.frame.seq;img=new Image();img.onload=draw;img.src="/api/view.jpg?"+imgSeq}
+   if(S.frame.seq!==camSeq&&S.frame.seq!=null){camSeq=S.frame.seq;$("cam").src="/api/camera.jpg?"+camSeq}
+   ui();draw()}catch(e){}
+  setTimeout(poll,700)}
+poll();
+cv.addEventListener("pointerdown",e=>{if(!S)return;const p=toNorm(e),m=$("mode").value;
+  if(m==="target"){post("/api/target",{x:p[0],y:p[1]})}
+  else if(m==="del"){const k=S.manual.findIndex(r=>p[0]>=r[0]&&p[0]<=r[2]&&p[1]>=r[1]&&p[1]<=r[3]);if(k>=0){const rs=S.manual.slice();rs.splice(k,1);post("/api/manual",{rects:rs})}}
+  else{drag={a:p,b:p};try{cv.setPointerCapture(e.pointerId)}catch(_){}}});
+cv.addEventListener("pointermove",e=>{if(drag){drag.b=toNorm(e);draw()}});
+cv.addEventListener("pointerup",e=>{if(!drag)return;const a=drag.a,b=toNorm(e);drag=null;
+  const r=[Math.min(a[0],b[0]),Math.min(a[1],b[1]),Math.max(a[0],b[0]),Math.max(a[1],b[1])];if(r[2]-r[0]>0.01&&r[3]-r[1]>0.01){post("/api/manual",{rects:S.manual.concat([r])})}});
+$("arm").onchange=async e=>{const r=await post("/api/arm",{armed:e.target.checked});if(r.error){alert(r.error);e.target.checked=false}};
+$("start").onclick=async()=>{const r=await post("/api/start");if(r.error||r.ok===false)alert(r.error||r.msg)};
+const STOP=()=>post("/api/stop");$("stop").onclick=STOP;
+addEventListener("keydown",e=>{if(e.code==="Space"&&e.target.tagName!=="INPUT"){e.preventDefault();STOP()}});
+$("rw").onchange=$("rl").onchange=$("mm").onchange=()=>post("/api/config",{rover_w_mm:+$("rw").value,rover_l_mm:+$("rl").value,margin_mm:+$("mm").value});
+$("recal").onclick=()=>post("/api/recal_ground");$("clrmap").onclick=()=>post("/api/clear_map");
+$("rec").onclick=()=>post("/api/record",{on:!(S&&S.recording)});
+$("mode").onchange=()=>{$("hint").textContent={target:"click the map to set the destination",box:"drag a rectangle over an obstacle the camera cannot see",del:"click a manual box to delete it"}[$("mode").value]};
+</script></body></html>
